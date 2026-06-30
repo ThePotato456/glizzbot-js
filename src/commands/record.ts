@@ -4,6 +4,7 @@ export function createRecordCommands(): BotCommand[] {
   return [
     {
       name: "vcrecord",
+      cog: "record",
       description: "Start voice recording.",
       ownerOnly: true,
       guildOnly: true,
@@ -13,6 +14,7 @@ export function createRecordCommands(): BotCommand[] {
     },
     {
       name: "stoprecord",
+      cog: "record",
       description: "Stop voice recording.",
       ownerOnly: true,
       guildOnly: true,

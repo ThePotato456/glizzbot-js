@@ -6,6 +6,7 @@ export function createEventCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "ufcevents",
       aliases: ["ufc"],
+      cog: "events",
       description: "Preview upcoming UFC events.",
       async execute(ctx) {
         const events = await bot.events.listUpcomingUfcEvents();
@@ -15,6 +16,7 @@ export function createEventCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "events",
+      cog: "events",
       description: "Alias for ufcevents.",
       async execute(ctx) {
         const events = await bot.events.listUpcomingUfcEvents();
@@ -25,6 +27,7 @@ export function createEventCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "scheduleufc",
       aliases: ["schedule"],
+      cog: "events",
       description: "Stub scheduled-event creation entrypoint.",
       guildOnly: true,
       async execute(ctx) {
@@ -34,6 +37,7 @@ export function createEventCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "clearufcevents",
       aliases: ["clearufc"],
+      cog: "events",
       description: "Stub scheduled-event cleanup entrypoint.",
       guildOnly: true,
       async execute(ctx) {

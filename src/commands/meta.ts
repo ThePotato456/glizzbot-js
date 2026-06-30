@@ -4,6 +4,7 @@ import type { GlizzBot } from "../bot.js";
 export function createHelpCommand(bot: GlizzBot): BotCommand {
   return {
     name: "help",
+    cog: "manager",
     description: "List bot commands.",
     async execute(ctx) {
       const unique = new Map<string, BotCommand>();

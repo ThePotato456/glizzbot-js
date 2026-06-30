@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { MusicState, QueueItem } from "../types.js";
 import { formatDuration } from "../utils/format.js";
+import type { MusicResolverService } from "./musicResolverService.js";
 
 export class MusicService {
   private readonly states = new Map<string, MusicState>();
@@ -41,22 +42,28 @@ export class MusicService {
     return queueItem;
   }
 
-  startNext(guildId: string): QueueItem | null {
+  async startNext(guildId: string, resolver?: MusicResolverService): Promise<QueueItem | null> {
     const state = this.getState(guildId);
-    const next = state.queue.shift() ?? null;
+    let next = state.queue.shift() ?? null;
+    if (next && resolver) {
+      next = await resolver.resolveQueueItem(next);
+    }
     state.current = next;
     state.startedAt = next ? Date.now() : null;
     state.isPaused = false;
+    if (resolver) {
+      this.prefetchNext(guildId, resolver);
+    }
     return next;
   }
 
-  skip(guildId: string, reason: string): QueueItem | null {
+  async skip(guildId: string, reason: string, resolver?: MusicResolverService): Promise<QueueItem | null> {
     const state = this.getState(guildId);
     state.lastStopReason = reason;
     state.current = null;
     state.startedAt = null;
     state.isPaused = false;
-    return this.startNext(guildId);
+    return this.startNext(guildId, resolver);
   }
 
   stop(guildId: string, reason: string): void {
@@ -138,5 +145,28 @@ export class MusicService {
 
   getIdleDisconnectMs(): number {
     return this.idleDisconnectMs;
+  }
+
+  private prefetchNext(guildId: string, resolver: MusicResolverService): void {
+    const state = this.getState(guildId);
+    const next = state.queue[0];
+    if (!next || next.isResolved || next.prefetchedAt) {
+      return;
+    }
+
+    void resolver.resolveQueueItem(next)
+      .then((resolved) => {
+        const current = state.queue[0];
+        if (!current || current.id !== resolved.id) {
+          return;
+        }
+        state.queue[0] = {
+          ...resolved,
+          prefetchedAt: Date.now(),
+        };
+      })
+      .catch(() => {
+        // Prefetch failures should not break queue advancement.
+      });
   }
 }

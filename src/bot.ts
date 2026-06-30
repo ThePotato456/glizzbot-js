@@ -8,6 +8,7 @@ import {
 import { ConfigStore } from "./config.js";
 import { AppLogger } from "./logger.js";
 import { MusicService } from "./services/musicService.js";
+import { MusicResolverService } from "./services/musicResolverService.js";
 import { ChatService } from "./services/chatService.js";
 import { EventsService } from "./services/eventsService.js";
 import { SoundService } from "./services/soundService.js";
@@ -18,6 +19,7 @@ import { startWebPanel } from "./web/panel.js";
 export class GlizzBot extends Client {
   readonly commands = new Collection<string, BotCommand>();
   readonly music: MusicService;
+  readonly musicResolver = new MusicResolverService();
   readonly chat = new ChatService();
   readonly events = new EventsService();
   readonly sounds: SoundService;
@@ -69,6 +71,9 @@ export class GlizzBot extends Client {
 
   private registerCommands(commands: BotCommand[]): void {
     for (const command of commands) {
+      if (!this.config.enabledCogs.includes(command.cog)) {
+        continue;
+      }
       this.commands.set(command.name, command);
       for (const alias of command.aliases ?? []) {
         this.commands.set(alias, command);

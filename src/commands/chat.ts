@@ -5,6 +5,7 @@ export function createChatCommands(bot: GlizzBot): BotCommand[] {
   return [
     {
       name: "chat",
+      cog: "chat",
       description: "Send a prompt to the local chat backend.",
       guildOnly: true,
       async execute(ctx) {
@@ -18,6 +19,7 @@ export function createChatCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "reset",
+      cog: "chat",
       description: "Reset the current conversation.",
       guildOnly: true,
       async execute(ctx) {
@@ -27,6 +29,7 @@ export function createChatCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "convo",
+      cog: "chat",
       description: "Show the stored conversation.",
       guildOnly: true,
       async execute(ctx) {
@@ -37,6 +40,7 @@ export function createChatCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "changepersona",
+      cog: "chat",
       description: "Set a new persona/system prompt.",
       guildOnly: true,
       async execute(ctx) {
@@ -50,6 +54,7 @@ export function createChatCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "tokens",
+      cog: "chat",
       description: "Estimate token count for the current conversation.",
       guildOnly: true,
       async execute(ctx) {

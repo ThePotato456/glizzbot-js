@@ -5,6 +5,7 @@ export function createSoundCommands(bot: GlizzBot): BotCommand[] {
   return [
     {
       name: "sounds",
+      cog: "sound",
       description: "List available local sounds.",
       async execute(ctx) {
         const sounds = bot.sounds.listSounds();
@@ -17,6 +18,7 @@ export function createSoundCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "playsound",
+      cog: "sound",
       description: "Play a configured local sound.",
       guildOnly: true,
       async execute(ctx) {

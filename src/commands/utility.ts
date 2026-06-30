@@ -6,6 +6,7 @@ export function createUtilityCommands(bot: GlizzBot): BotCommand[] {
   return [
     {
       name: "ping",
+      cog: "utility",
       description: "Ping the configured guild role or show latency.",
       async execute(ctx) {
         if (!ctx.guild) {
@@ -18,6 +19,7 @@ export function createUtilityCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "curvetext",
+      cog: "utility",
       description: "Convert text to curve font.",
       async execute(ctx) {
         await ctx.reply(ctx.rawArgs ? toCurveText(ctx.rawArgs) : "Usage: curvetext <text>");
@@ -25,6 +27,7 @@ export function createUtilityCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "google",
+      cog: "utility",
       description: "Return a Google search link.",
       async execute(ctx) {
         if (!ctx.rawArgs) {
@@ -37,6 +40,7 @@ export function createUtilityCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "servers",
+      cog: "utility",
       description: "List connected servers.",
       ownerOnly: true,
       async execute(ctx) {

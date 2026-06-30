@@ -1,21 +1,12 @@
-import type { BotCommand, QueueItem } from "../types.js";
+import type { BotCommand } from "../types.js";
 import type { GlizzBot } from "../bot.js";
-
-function buildQueueItem(rawArgs: string, userId: string, sourceType: QueueItem["sourceType"]): Omit<QueueItem, "id" | "addedAt"> {
-  return {
-    title: rawArgs,
-    url: rawArgs,
-    requestedBy: userId,
-    isResolved: sourceType !== "search",
-    sourceType,
-  };
-}
 
 export function createMusicCommands(bot: GlizzBot): BotCommand[] {
   return [
     {
       name: "play",
       aliases: ["p"],
+      cog: "music",
       description: "Queue a track or URL.",
       guildOnly: true,
       async execute(ctx) {
@@ -23,20 +14,21 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           await ctx.reply("Usage: play <query-or-url>");
           return;
         }
-        const sourceType = /^https?:\/\//i.test(ctx.rawArgs) ? "url" : "search";
-        const item = bot.music.enqueue(ctx.guild.id, buildQueueItem(ctx.rawArgs, ctx.message.author.id, sourceType));
+        const resolved = await bot.musicResolver.resolveInput(ctx.rawArgs, ctx.message.author.id);
+        const items = resolved.items.map((item) => bot.music.enqueue(ctx.guild!.id, item));
         const state = bot.music.getState(ctx.guild.id);
         if (!state.current) {
-          bot.music.startNext(ctx.guild.id);
-          await ctx.reply(`Queued and started: **${item.title}**`);
+          const started = await bot.music.startNext(ctx.guild.id, bot.musicResolver);
+          await ctx.reply(started ? `Queued and started: **${started.title}**\n${resolved.summary}` : resolved.summary);
           return;
         }
-        await ctx.reply(`Queued: **${item.title}**`);
+        await ctx.reply(`${resolved.summary}\nAdded ${items.length} item(s) to the queue.`);
       },
     },
     {
       name: "queue",
       aliases: ["q"],
+      cog: "music",
       description: "Show the queue.",
       guildOnly: true,
       async execute(ctx) {
@@ -46,6 +38,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "nowplaying",
       aliases: ["np"],
+      cog: "music",
       description: "Show the active track.",
       guildOnly: true,
       async execute(ctx) {
@@ -55,15 +48,17 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "skip",
       aliases: ["s"],
+      cog: "music",
       description: "Skip the current track.",
       guildOnly: true,
       async execute(ctx) {
-        const next = bot.music.skip(ctx.guild!.id, "manual-skip");
+        const next = await bot.music.skip(ctx.guild!.id, "manual-skip", bot.musicResolver);
         await ctx.reply(next ? `Skipped. Next up: **${next.title}**` : "Skipped. Queue is now empty.");
       },
     },
     {
       name: "stop",
+      cog: "music",
       description: "Stop playback and clear the queue.",
       guildOnly: true,
       async execute(ctx) {
@@ -73,6 +68,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "clear",
+      cog: "music",
       description: "Clear queued tracks.",
       guildOnly: true,
       async execute(ctx) {
@@ -83,6 +79,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "shuffle",
       aliases: ["sh"],
+      cog: "music",
       description: "Shuffle the queue.",
       guildOnly: true,
       async execute(ctx) {
@@ -92,6 +89,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "remove",
+      cog: "music",
       description: "Remove a track by queue position.",
       guildOnly: true,
       async execute(ctx) {
@@ -102,6 +100,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "insert",
+      cog: "music",
       description: "Insert a query at a queue position.",
       guildOnly: true,
       async execute(ctx) {
@@ -111,12 +110,19 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           await ctx.reply("Usage: insert <position> <query>");
           return;
         }
-        const item = bot.music.insert(ctx.guild!.id, index, buildQueueItem(query, ctx.message.author.id, "search"));
+        const resolved = await bot.musicResolver.resolveInput(query, ctx.message.author.id);
+        const first = resolved.items[0];
+        if (!first) {
+          await ctx.reply("Could not resolve that query.");
+          return;
+        }
+        const item = bot.music.insert(ctx.guild!.id, index, first);
         await ctx.reply(`Inserted **${item.title}** at position ${index + 1}.`);
       },
     },
     {
       name: "noleave",
+      cog: "music",
       description: "Toggle idle disconnect behavior.",
       guildOnly: true,
       async execute(ctx) {
@@ -127,6 +133,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "timing",
+      cog: "music",
       description: "Toggle music timing diagnostics for this guild.",
       guildOnly: true,
       async execute(ctx) {
@@ -137,6 +144,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "markaudio",
+      cog: "music",
       description: "Bookmark the current audio state for diagnostics.",
       guildOnly: true,
       async execute(ctx) {

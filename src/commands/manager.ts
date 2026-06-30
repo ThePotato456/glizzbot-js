@@ -5,6 +5,7 @@ export function createManagerCommands(bot: GlizzBot): BotCommand[] {
   return [
     {
       name: "listcogs",
+      cog: "manager",
       description: "List enabled cogs.",
       ownerOnly: true,
       async execute(ctx) {
@@ -13,6 +14,7 @@ export function createManagerCommands(bot: GlizzBot): BotCommand[] {
     },
     {
       name: "reloadall",
+      cog: "manager",
       description: "Rebuild the in-memory command registry.",
       ownerOnly: true,
       async execute(ctx) {

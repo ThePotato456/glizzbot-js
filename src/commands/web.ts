@@ -5,6 +5,7 @@ export function createWebCommands(bot: GlizzBot): BotCommand[] {
   return [
     {
       name: "status",
+      cog: "webPanel",
       description: "Show the local web panel URL.",
       async execute(ctx) {
         await ctx.reply(`Web panel: http://localhost:${bot.config.webPanel.port}`);

@@ -1,10 +1,4 @@
-import type {
-  ChatInputCommandInteraction,
-  Guild,
-  GuildMember,
-  Message,
-  TextBasedChannel,
-} from "discord.js";
+import type { Guild, GuildMember, Message, TextBasedChannel } from "discord.js";
 
 export interface GuildConfig {
   admins: string[];
@@ -75,10 +69,21 @@ export interface BotCommand {
   name: string;
   aliases?: string[];
   description: string;
+  cog: string;
   ownerOnly?: boolean;
   guildOnly?: boolean;
   execute: (ctx: CommandContext) => Promise<void>;
 }
+
+export type QueueSourceType =
+  | "url"
+  | "search"
+  | "spotify"
+  | "youtubePlaylist"
+  | "spotifyPlaylist"
+  | "spotifyAlbum"
+  | "sound"
+  | "local";
 
 export interface QueueItem {
   id: string;
@@ -87,9 +92,11 @@ export interface QueueItem {
   requestedBy: string;
   durationSeconds?: number;
   isResolved: boolean;
-  sourceType: "url" | "search" | "spotify" | "sound" | "local";
+  sourceType: QueueSourceType;
   streamUrl?: string;
   localFile?: string;
+  resolverNote?: string;
+  prefetchedAt?: number;
   addedAt: number;
 }
 
