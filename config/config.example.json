@@ -1,0 +1,48 @@
+{
+  "debug": true,
+  "prefix": "!",
+  "enabledCogs": [
+    "manager",
+    "music",
+    "utility",
+    "events",
+    "sound",
+    "record",
+    "chat",
+    "ytdlp",
+    "webPanel"
+  ],
+  "discord": {
+    "token": "",
+    "ownerId": "",
+    "intents": ["Guilds", "GuildMessages", "GuildVoiceStates", "MessageContent"]
+  },
+  "spotify": {
+    "enabled": false,
+    "clientId": "",
+    "clientSecret": ""
+  },
+  "events": {
+    "lookaheadDays": 21,
+    "lookbackDays": 2,
+    "defaultDurationMinutes": 240
+  },
+  "music": {
+    "idleDisconnectMs": 120000,
+    "shouldLeaveWhenIdle": true,
+    "timingDebugDefault": false
+  },
+  "webPanel": {
+    "enabled": true,
+    "port": 3000,
+    "token": ""
+  },
+  "guildDefaults": {
+    "admins": [],
+    "commandChannels": [],
+    "pingRoleId": null,
+    "channelWhitelist": [],
+    "blockedUsers": []
+  },
+  "guilds": {}
+}

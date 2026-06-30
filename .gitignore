@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+config/config.json
+config/database.db
+discord.log
+downloads/
+recordings/
+temp/
+!.gitkeep
