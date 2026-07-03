@@ -1,26 +1,7 @@
 import { ChannelType, EmbedBuilder, PermissionsBitField } from "discord.js";
 import type { BotCommand } from "../types.js";
 import type { GlizzBot } from "../bot.js";
-import { formatDuration, toCurveText } from "../utils/format.js";
-
-const MUSIC_EMBED_TITLE = toCurveText("MusicBot");
-
-function createMusicEmbed(description: string): EmbedBuilder {
-  return new EmbedBuilder()
-    .setTitle(MUSIC_EMBED_TITLE)
-    .setDescription(description);
-}
-
-function buildTrackEmbed(
-  title: string,
-  track: { title: string; requestedBy?: string; durationSeconds?: number },
-): EmbedBuilder {
-  return createMusicEmbed(`**__${title}:__**\n${title === "Now Playing" ? "\t\t" : ""}${track.title}`)
-    .addFields(
-      { name: toCurveText("Queued By"), value: track.requestedBy || "Unknown", inline: true },
-      { name: toCurveText("Song Length"), value: formatDuration(track.durationSeconds), inline: true },
-    );
-}
+import { buildTrackEmbed, createMusicEmbed } from "./musicEmbeds.js";
 
 function buildQueueEmbed(bot: GlizzBot, guildId: string): EmbedBuilder {
   const state = bot.music.getState(guildId);
@@ -37,6 +18,10 @@ async function replyWithMusicEmbed(
   ctx: Parameters<BotCommand["execute"]>[0],
   embed: EmbedBuilder,
 ): Promise<void> {
+  if ("send" in ctx.channel && typeof ctx.channel.send === "function") {
+    await ctx.channel.send({ embeds: [embed] });
+    return;
+  }
   await ctx.message.reply({ embeds: [embed] });
 }
 
@@ -133,7 +118,11 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
         if (!state.current) {
           const started = await bot.music.advancePlayback(ctx.guild.id, bot.musicResolver);
           if (started) {
-            await replyWithMusicEmbed(ctx, buildTrackEmbed("Now Playing", started));
+            const embed = buildTrackEmbed("Now Playing", started);
+            if (items.length > 1) {
+              embed.setFooter({ text: `Queued ${items.length - 1} more track(s).` });
+            }
+            await replyWithMusicEmbed(ctx, embed);
           } else {
             await ctx.reply(resolved.summary);
           }
@@ -180,6 +169,14 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       async execute(ctx) {
         const next = await bot.music.skip(ctx.guild!.id, "manual-skip", bot.musicResolver);
         await replyWithMusicEmbed(ctx, createMusicEmbed(next ? "Skipped current track!" : "Nothing is playing!"));
+        if (next) {
+          const state = bot.music.getState(ctx.guild!.id);
+          const embed = buildTrackEmbed("Now Playing", next);
+          if (state.queue.length > 0) {
+            embed.setFooter({ text: `${state.queue.length} track(s) remaining in queue.` });
+          }
+          await replyWithMusicEmbed(ctx, embed);
+        }
       },
     },
     {

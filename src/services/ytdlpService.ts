@@ -9,6 +9,8 @@ interface YtDlpMetadata {
   webpage_url?: string;
   original_url?: string;
   extractor?: string;
+  extractor_key?: string;
+  ie_key?: string;
   entries?: Array<YtDlpMetadata | null>;
 }
 
@@ -21,6 +23,18 @@ export interface ResolvedMediaResult {
   webpageUrl?: string;
   extractor?: string;
   requestedQuery?: string;
+}
+
+export interface ResolvedPlaylistEntry {
+  title: string;
+  url: string;
+  durationSeconds?: number;
+}
+
+export interface ResolvedPlaylistResult {
+  title: string;
+  entries: ResolvedPlaylistEntry[];
+  extractor?: string;
 }
 
 export type YtDlpRunner = (args: string[]) => Promise<string>;
@@ -51,6 +65,20 @@ export class YtDlpService {
     };
   }
 
+  async resolvePlaylist(input: string): Promise<ResolvedPlaylistResult> {
+    const metadata = await this.fetchPlaylistMetadata(input);
+    const entries = (metadata.entries ?? [])
+      .filter((entry): entry is YtDlpMetadata => Boolean(entry))
+      .map((entry) => this.toPlaylistEntry(entry, input))
+      .filter((entry): entry is ResolvedPlaylistEntry => Boolean(entry));
+
+    return {
+      title: metadata.title ?? "Playlist",
+      entries,
+      extractor: metadata.extractor,
+    };
+  }
+
   private async fetchMetadata(input: string): Promise<YtDlpMetadata> {
     const stdout = await this.runYtDlp([
       "--dump-single-json",
@@ -59,6 +87,53 @@ export class YtDlpService {
       input,
     ]);
     return JSON.parse(stdout) as YtDlpMetadata;
+  }
+
+  private async fetchPlaylistMetadata(input: string): Promise<YtDlpMetadata> {
+    const stdout = await this.runYtDlp([
+      "--dump-single-json",
+      "--flat-playlist",
+      input,
+    ]);
+    return JSON.parse(stdout) as YtDlpMetadata;
+  }
+
+  private toPlaylistEntry(entry: YtDlpMetadata, fallbackInput: string): ResolvedPlaylistEntry | null {
+    const url = this.getPlaylistEntryUrl(entry, fallbackInput);
+    if (!url) {
+      return null;
+    }
+
+    return {
+      title: entry.title ?? url,
+      url,
+      durationSeconds: entry.duration,
+    };
+  }
+
+  private getPlaylistEntryUrl(entry: YtDlpMetadata, fallbackInput: string): string | null {
+    if (entry.webpage_url) {
+      return entry.webpage_url;
+    }
+
+    if (entry.original_url) {
+      return entry.original_url;
+    }
+
+    if (entry.url?.startsWith("http://") || entry.url?.startsWith("https://")) {
+      return entry.url;
+    }
+
+    const extractorKey = (entry.extractor_key ?? entry.ie_key ?? entry.extractor ?? "").toLowerCase();
+    if (entry.id && (extractorKey.includes("youtube") || extractorKey === "youtube")) {
+      return `https://www.youtube.com/watch?v=${entry.id}`;
+    }
+
+    if (entry.id && (extractorKey.includes("soundcloud") || fallbackInput.includes("soundcloud.com"))) {
+      return `https://soundcloud.com/${entry.id}`;
+    }
+
+    return null;
   }
 
   private runYtDlp(args: string[]): Promise<string> {

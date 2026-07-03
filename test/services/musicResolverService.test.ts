@@ -65,14 +65,44 @@ test("resolveQueueItem refreshes a deferred item into a stream url", async () =>
   assert.match(resolved.resolverNote ?? "", /Resolved stream with yt-dlp/);
 });
 
-test("resolveInput rejects playlist URLs instead of queueing placeholders", async () => {
+test("resolveInput expands YouTube playlist URLs into deferred queue items", async () => {
+  const paths = createTestRuntimePaths();
+  const resolver = new MusicResolverService(paths, async () => JSON.stringify({
+    title: "Test Playlist",
+    extractor: "youtube:tab",
+    entries: [
+      {
+        id: "abc123",
+        title: "Playlist Track One",
+        ie_key: "Youtube",
+      },
+      {
+        id: "def456",
+        title: "Playlist Track Two",
+        ie_key: "Youtube",
+      },
+    ],
+  }));
+
+  const result = await resolver.resolveInput("https://www.youtube.com/watch?v=abc123&list=playlist42", "user-1");
+
+  assert.equal(result.items.length, 2);
+  assert.equal(result.items[0]?.title, "Playlist Track One");
+  assert.equal(result.items[0]?.url, "https://www.youtube.com/watch?v=abc123");
+  assert.equal(result.items[0]?.isResolved, false);
+  assert.equal(result.items[0]?.sourceType, "url");
+  assert.equal(result.items[1]?.title, "Playlist Track Two");
+  assert.match(result.summary, /Queued 2 track\(s\) from playlist/i);
+});
+
+test("resolveInput reports playlist expansion failures clearly", async () => {
   const paths = createTestRuntimePaths();
   const resolver = new MusicResolverService(paths, async () => {
-    throw new Error("should not be called for playlist placeholder");
+    throw new Error("playlist metadata unavailable");
   });
 
   const result = await resolver.resolveInput("https://www.youtube.com/watch?v=abc123&list=playlist42", "user-1");
 
   assert.equal(result.items.length, 0);
-  assert.match(result.summary, /playlist urls are not supported yet/i);
+  assert.match(result.summary, /Failed to expand playlist with yt-dlp/i);
 });

@@ -39,7 +39,17 @@ function createCommandContext(overrides: Partial<CommandContext> = {}) {
     rawArgs: "",
     guild: { id: "guild-1" } as never,
     member: { voice: { channelId: "voice-1" } } as never,
-    channel: { id: "text-1" } as never,
+    channel: {
+      id: "text-1",
+      send: async (payload: string | { embeds?: ReplyRecord["embeds"] }) => {
+        if (typeof payload === "string") {
+          replies.push({ content: payload });
+        } else {
+          replies.push({ embeds: payload.embeds });
+        }
+        return {} as never;
+      },
+    } as never,
     reply: async (content: string) => {
       replies.push({ content });
       return {} as never;
@@ -90,9 +100,9 @@ function createBotMock() {
       ensureVoiceConnection: async () => {
         calls.ensureVoiceConnection += 1;
       },
-      enqueue: () => {
+      enqueue: (_guildId: string, item: Omit<QueueItem, "id" | "addedAt">) => {
         calls.enqueue += 1;
-        return { id: "queued", addedAt: Date.now(), ...createQueueItem() };
+        return { id: "queued", addedAt: Date.now(), ...item };
       },
       getState: () => state,
       advancePlayback: async () => {
@@ -204,6 +214,7 @@ test("skip replies with the next track title when one exists", async () => {
 
   assert.equal(calls.skip, 1);
   assert.equal(replies[0]?.embeds?.[0]?.data?.description, "Skipped current track!");
+  assert.equal(replies[1]?.embeds?.[0]?.data?.description, "**__Now Playing:__**\n\t\tNext Track");
 });
 
 test("play queues without advancing when a track is already active", async () => {
@@ -220,6 +231,33 @@ test("play queues without advancing when a track is already active", async () =>
   assert.equal(calls.advancePlayback, 0);
   assert.equal(replies[0]?.embeds?.[0]?.data?.description, "**__Queued Song:__**\nResolved Track");
   assert.equal(replies[0]?.embeds?.[0]?.data?.footer?.text, "Added 1 item(s) to the queue.");
+});
+
+test("play shows remaining queued tracks when a playlist starts immediately", async () => {
+  const { bot, calls } = createBotMock();
+  bot.musicResolver.resolveInput = async () => {
+    calls.resolveInput += 1;
+    return {
+      items: [
+        createQueueItem({ title: "Playlist One", url: "https://example.com/watch?v=1" }),
+        createQueueItem({ title: "Playlist Two", url: "https://example.com/watch?v=2" }),
+        createQueueItem({ title: "Playlist Three", url: "https://example.com/watch?v=3" }),
+      ],
+      summary: "Queued 3 track(s) from playlist: **Test Playlist**",
+    };
+  };
+  bot.music.advancePlayback = async () => {
+    calls.advancePlayback += 1;
+    return { id: "current", addedAt: Date.now(), ...createQueueItem({ title: "Playlist One" }) };
+  };
+  const command = getCommand(createMusicCommands(bot), "play");
+  const { ctx, replies } = createCommandContext({ rawArgs: "https://www.youtube.com/watch?v=1&list=abc" });
+
+  await command.execute(ctx);
+
+  assert.equal(calls.enqueue, 3);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "**__Now Playing:__**\n\t\tPlaylist One");
+  assert.equal(replies[0]?.embeds?.[0]?.data?.footer?.text, "Queued 2 more track(s).");
 });
 
 test("skip reports an empty queue when nothing else can play", async () => {

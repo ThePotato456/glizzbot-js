@@ -11,8 +11,9 @@ import { MusicService } from "./services/musicService.js";
 import { MusicResolverService } from "./services/musicResolverService.js";
 import { ChatService } from "./services/chatService.js";
 import { EventsService } from "./services/eventsService.js";
-import type { AppConfig, BotCommand, CommandContext, RuntimePaths } from "./types.js";
+import type { AppConfig, BotCommand, CommandContext, QueueItem, RuntimePaths } from "./types.js";
 import { buildCommands } from "./commands/index.js";
+import { buildTrackEmbed } from "./commands/musicEmbeds.js";
 import { startWebPanel } from "./web/panel.js";
 
 export class GlizzBot extends Client {
@@ -49,7 +50,8 @@ export class GlizzBot extends Client {
     );
     this.logger.debug(`Voice dependency report:\n${this.music.getDependencyReport()}`);
     this.music.setTrackFinishedHandler(async (guildId) => {
-      await this.music.advancePlayback(guildId, this.musicResolver);
+      const started = await this.music.advancePlayback(guildId, this.musicResolver);
+      await this.announceNowPlaying(guildId, started);
     });
   }
 
@@ -167,6 +169,33 @@ export class GlizzBot extends Client {
       this.lagMs = Math.max(0, now - expected);
       expected = now + 1000;
     }, 1000).unref();
+  }
+
+  private async announceNowPlaying(guildId: string, track: QueueItem | null): Promise<void> {
+    if (!track) {
+      return;
+    }
+
+    const state = this.music.getState(guildId);
+    const textChannelId = state.textChannelId;
+    if (!textChannelId) {
+      return;
+    }
+
+    const channel = this.channels.cache.get(textChannelId) ?? await this.channels.fetch(textChannelId).catch(() => null);
+    if (!channel?.isTextBased() || !("send" in channel) || typeof channel.send !== "function") {
+      return;
+    }
+
+    const embed = buildTrackEmbed("Now Playing", track);
+    if (state.queue.length > 0) {
+      embed.setFooter({ text: `${state.queue.length} track(s) remaining in queue.` });
+    }
+
+    await channel.send({ embeds: [embed] }).catch((error: unknown) => {
+      const details = error instanceof Error ? error.stack ?? error.message : String(error);
+      this.logger.error(`Failed to announce now playing for guild ${guildId}: ${details}`);
+    });
   }
 
   private getUserFacingCommandError(error: unknown): string {

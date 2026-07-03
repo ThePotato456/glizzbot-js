@@ -89,10 +89,7 @@ export class MusicResolverService {
           summary: "Spotify album URLs are not supported yet. Use `play <query or url>` with a single track or search query.",
         };
       case "youtubePlaylist":
-        return {
-          items: [],
-          summary: "YouTube playlist URLs are not supported yet. Use a single video URL or a search query.",
-        };
+        return this.resolvePlaylist(normalized, requestedBy);
       case "url":
       default:
         return this.resolveViaYtDlp(normalized, requestedBy, "url");
@@ -157,6 +154,38 @@ export class MusicResolverService {
           ),
         ],
         summary: `Queued ${sourceType === "search" ? "query" : "URL"} for yt-dlp resolution on playback.`,
+      };
+    }
+  }
+
+  private async resolvePlaylist(input: string, requestedBy: string): Promise<ResolvedQueueRequest> {
+    try {
+      const prepared = await this.ytdlp.resolvePlaylist(input);
+      const items = prepared.entries.map((entry) => ({
+        title: entry.title,
+        url: entry.url,
+        requestedBy,
+        durationSeconds: entry.durationSeconds,
+        isResolved: false,
+        sourceType: "url" as const,
+        resolverNote: `Queued from playlist${prepared.title ? `: ${prepared.title}` : ""}. Stream will resolve before playback.`,
+      }));
+
+      if (items.length === 0) {
+        return {
+          items: [],
+          summary: "No playable entries were found in that playlist.",
+        };
+      }
+
+      return {
+        items,
+        summary: `Queued ${items.length} track(s) from playlist: **${prepared.title}**`,
+      };
+    } catch (error) {
+      return {
+        items: [],
+        summary: `Failed to expand playlist with yt-dlp: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
