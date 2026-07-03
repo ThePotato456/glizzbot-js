@@ -8,6 +8,13 @@ interface ReplyRecord {
   embeds?: Array<{ data?: { description?: string; footer?: { text?: string } } }>;
 }
 
+interface SongHistoryRow {
+  song_title: string;
+  song_url: string;
+  user_id: string;
+  duration: string;
+}
+
 function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "id" | "addedAt"> {
   return {
     title: "Resolved Track",
@@ -23,7 +30,12 @@ function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "i
 function createCommandContext(overrides: Partial<CommandContext> = {}) {
   const replies: ReplyRecord[] = [];
   const message = {
-    author: { id: "user-1", tag: "tester#0001" },
+    author: { id: "user-1", tag: "tester#0001", username: "tester" },
+    mentions: {
+      users: {
+        first: () => null,
+      },
+    },
     reply: async (payload: string | { embeds?: ReplyRecord["embeds"] }) => {
       if (typeof payload === "string") {
         replies.push({ content: payload });
@@ -84,7 +96,17 @@ function createBotMock() {
     pause: 0,
     resume: 0,
     skip: 0,
+    getRandomHistory: 0,
   };
+
+  const randomHistory: SongHistoryRow[] = [
+    {
+      song_title: "History Track",
+      song_url: "https://example.com/watch?v=history",
+      user_id: "user-1",
+      duration: "03:21",
+    },
+  ];
 
   const bot = {
     musicResolver: {
@@ -122,6 +144,10 @@ function createBotMock() {
         calls.skip += 1;
         return { id: "next", addedAt: Date.now(), ...createQueueItem({ title: "Next Track" }) };
       },
+      getRandomHistory: () => {
+        calls.getRandomHistory += 1;
+        return randomHistory;
+      },
       getVoiceSummary: () => "voice summary",
       queueSummary: () => "queue summary",
       describeNowPlaying: () => "now playing",
@@ -151,6 +177,94 @@ test("play replies with usage when no query or url is provided", async () => {
   await command.execute(ctx);
 
   assert.deepEqual(replies, [{ content: "Usage: play <query or url>" }]);
+});
+
+test("playrandom replies with usage when the amount is missing or invalid", async () => {
+  const { bot } = createBotMock();
+  const command = getCommand(createMusicCommands(bot), "playrandom");
+  const missing = createCommandContext({ args: [] });
+  const invalid = createCommandContext({ args: ["abc"] });
+
+  await command.execute(missing.ctx);
+  await command.execute(invalid.ctx);
+
+  assert.deepEqual(missing.replies, [{ content: "Usage: playrandom <number> [@user/user_id]" }]);
+  assert.deepEqual(invalid.replies, [{ content: "Usage: playrandom <number> [@user/user_id]" }]);
+});
+
+test("playrandom queues songs from the caller history by default and starts playback", async () => {
+  const { bot, calls } = createBotMock();
+  const command = getCommand(createMusicCommands(bot), "playrandom");
+  const { ctx, replies } = createCommandContext({ args: ["2"] });
+  bot.music.getRandomHistory = (amount: number, userId?: string) => {
+    calls.getRandomHistory += 1;
+    assert.equal(amount, 2);
+    assert.equal(userId, "user-1");
+    return [
+      {
+        song_title: "History One",
+        song_url: "abc123",
+        user_id: "user-1",
+        duration: "03:21",
+      },
+      {
+        song_title: "History Two",
+        song_url: "https://example.com/watch?v=2",
+        user_id: "user-1",
+        duration: "02:10",
+      },
+    ];
+  };
+  bot.music.advancePlayback = async () => {
+    calls.advancePlayback += 1;
+    return { id: "current", addedAt: Date.now(), ...createQueueItem({ title: "History One" }) };
+  };
+
+  await command.execute(ctx);
+
+  assert.equal(calls.getRandomHistory, 1);
+  assert.equal(calls.ensureVoiceConnection, 1);
+  assert.equal(calls.enqueue, 2);
+  assert.equal(calls.advancePlayback, 1);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "**__Now Playing:__**\n\t\tHistory One");
+  assert.equal(replies[0]?.embeds?.[0]?.data?.footer?.text, "Queued 1 more random track(s) from tester's history.");
+});
+
+test("playrandom can target a mentioned user and queues without advancing when something is already active", async () => {
+  const { bot, calls, state } = createBotMock();
+  state.current = { id: "active", addedAt: Date.now(), ...createQueueItem({ title: "Already Playing" }) };
+  bot.music.getRandomHistory = (amount: number, userId?: string) => {
+    calls.getRandomHistory += 1;
+    assert.equal(amount, 1);
+    assert.equal(userId, "123456789012345678");
+    return [
+      {
+        song_title: "Mentioned Track",
+        song_url: "https://example.com/watch?v=mentioned",
+        user_id: "123456789012345678",
+        duration: "03:33",
+      },
+    ];
+  };
+  const { ctx, replies } = createCommandContext({
+    args: ["1", "<@123456789012345678>"],
+    message: {
+      author: { id: "user-1", tag: "tester#0001", username: "tester" },
+      mentions: {
+        users: {
+          first: () => ({ id: "123456789012345678", username: "friend" }),
+        },
+      },
+      reply: async () => ({} as never),
+    } as never,
+  });
+  const command = getCommand(createMusicCommands(bot), "playrandom");
+
+  await command.execute(ctx);
+
+  assert.equal(calls.getRandomHistory, 1);
+  assert.equal(calls.advancePlayback, 0);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "Queued 1 random song(s) from friend's history.");
 });
 
 test("play connects, resolves, and starts playback when nothing is active", async () => {

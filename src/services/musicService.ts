@@ -6,8 +6,10 @@ import { generateDependencyReport } from "@discordjs/voice";
 import { opus } from "prism-media";
 import { ChannelType, PermissionsBitField, type GuildMember } from "discord.js";
 import type { MusicState, QueueItem } from "../types.js";
+import type { RuntimePaths } from "../types.js";
 import { formatDuration } from "../utils/format.js";
 import type { MusicResolverService } from "./musicResolverService.js";
+import { SongHistoryRepository, type SongHistoryRow } from "./songHistoryRepository.js";
 import { DaveVoiceTransport } from "./voice/daveVoiceTransport.js";
 import type { VoiceTransport, VoiceTransportFactory } from "./voice/voiceTransport.js";
 
@@ -23,14 +25,18 @@ export class MusicService {
   private readonly sessions = new Map<string, GuildVoiceSession>();
   private readonly diagnostics = new Map<string, string[]>();
   private onTrackFinished: ((guildId: string) => Promise<void>) | null = null;
+  private readonly songHistory: SongHistoryRepository | null;
 
   constructor(
     private readonly idleDisconnectMs: number,
     private readonly defaultShouldLeave: boolean,
     private readonly defaultTimingDebug: boolean,
+    runtimePaths: Pick<RuntimePaths, "databaseFile" | "legacyDatabaseFile"> | null = null,
     private readonly transportFactory: VoiceTransportFactory = (member, callbacks) =>
       new DaveVoiceTransport(member, callbacks),
-  ) {}
+  ) {
+    this.songHistory = runtimePaths ? new SongHistoryRepository(runtimePaths) : null;
+  }
 
   getState(guildId: string): MusicState {
     let state = this.states.get(guildId);
@@ -67,6 +73,7 @@ export class MusicService {
       addedAt: Date.now(),
     };
     state.queue.push(queueItem);
+    this.songHistory?.recordTrack(queueItem);
     return queueItem;
   }
 
@@ -391,6 +398,7 @@ export class MusicService {
     const state = this.getState(guildId);
     const queueItem = this.materializeQueueItem(item);
     state.queue.splice(Math.max(0, index), 0, queueItem);
+    this.songHistory?.recordTrack(queueItem);
     return queueItem;
   }
 
@@ -452,6 +460,10 @@ DAVE
 
   getDiagnostics(guildId: string): string[] {
     return [...(this.diagnostics.get(guildId) ?? [])];
+  }
+
+  getRandomHistory(limit: number, userId?: string): SongHistoryRow[] {
+    return this.songHistory?.getRandomSongs(limit, userId) ?? [];
   }
 
   private prefetchNext(guildId: string, resolver: MusicResolverService): void {

@@ -2,6 +2,29 @@
 
 This document summarizes the current bot, grouped by subsystem, and turns that into a reimplementation checklist. It is written from the current codebase, not just the README.
 
+## Current JS Rewrite Status
+
+The TypeScript/Node rewrite is no longer just scaffolded. The following areas are currently working in the JS bot:
+
+- config loading with defaults, env overrides, per-guild helpers, and runtime directory bootstrap
+- custom Discord client runtime with command lifecycle logging and event-loop lag monitoring
+- modular command registration
+- working music playback with yt-dlp, ffmpeg, queue controls, playlist expansion, lazy per-track resolution, and one-track-ahead prefetch
+- custom DAVE-capable voice transport for Discord voice channels that require E2EE/DAVE
+- GlizzBot-style simple music embeds for visible music responses
+- local web panel status/export endpoints
+- legacy `song_history` SQLite compatibility, import, and active history writes
+
+The following areas are still partial or intentionally unfinished in the JS rewrite:
+
+- Spotify albums/playlists and richer Spotify helpers
+- history browsing and random-from-history commands
+- audio caching/download-to-local playback path
+- transcript/export parity with the Python utility/admin surface
+- full event scheduling parity
+- voice recording pipeline
+- old soundboard behavior, which has intentionally been retired in favor of `play`
+
 ## High-Level Summary
 
 GlizzBot is a py-cord Discord bot built around a modular cog architecture. Its main responsibilities are:
@@ -43,13 +66,13 @@ What it does:
 
 Reimplementation steps:
 
-- [ ] Create a central config module with defaults, validation, and env overrides.
-- [ ] Build a custom `commands.Bot` subclass instead of scattering startup logic across cogs.
-- [ ] Add a custom help command and remove the default one.
-- [ ] Add runtime logging for both Discord internals and bot-specific events.
-- [ ] Add an event loop lag monitor and expose the measured lag to the rest of the app.
-- [ ] Add command lifecycle logging (`start`, `complete`, `error`).
-- [ ] Add a shared in-memory bot log buffer for the web panel/export.
+- [x] Create a central config module with defaults, validation, and env overrides.
+- [x] Build a custom bot subclass instead of scattering startup logic across modules.
+- [x] Add a custom help command and remove the default one.
+- [x] Add runtime logging for both Discord internals and bot-specific events.
+- [x] Add an event loop lag monitor and expose the measured lag to the rest of the app.
+- [x] Add command lifecycle logging (`start`, `complete`, `error`).
+- [x] Add a shared in-memory bot log buffer for the web panel/export.
 - [ ] Load cogs dynamically from `cogs/`, honoring `ENABLED_COGS`.
 
 ## Configuration Model
@@ -69,12 +92,12 @@ What it does:
 
 Reimplementation steps:
 
-- [ ] Define a single authoritative config schema with nested defaults.
-- [ ] Split global config from per-guild config.
-- [ ] Implement safe merging of defaults with user config.
-- [ ] Implement secret override support from environment variables.
-- [ ] Validate required runtime fields before boot.
-- [ ] Add helper functions for reading and mutating per-guild config.
+- [x] Define a single authoritative config schema with nested defaults.
+- [x] Split global config from per-guild config.
+- [x] Implement safe merging of defaults with user config.
+- [x] Implement secret override support from environment variables.
+- [x] Validate required runtime fields before boot.
+- [x] Add helper functions for reading and mutating per-guild config.
 
 ## Cog System and Runtime Management
 
@@ -243,11 +266,12 @@ Likely user-facing commands in this area:
 
 Reimplementation steps:
 
-- [ ] Create SQLite schema and migrations for songs/history.
-- [ ] Save tracks when they are queued or successfully played, depending on flow.
-- [ ] Record requester identity with the history entry.
-- [ ] Add history browsing and random replay helpers.
-- [ ] Add one-time maintenance/backfill tasks for legacy rows.
+- [x] Create SQLite schema and migrations for songs/history.
+- [x] Save tracks when they are queued or successfully played, depending on flow.
+- [x] Record requester identity with the history entry.
+- [x] Add random replay helpers (`playrandom`) backed by imported song history.
+- [ ] Add history browsing and lookup helpers (`songhistory`, `songlink`).
+- [x] Add one-time maintenance/backfill/import support for legacy rows or DB files.
 
 ### Music Diagnostics
 
@@ -265,10 +289,10 @@ Key command:
 
 Reimplementation steps:
 
-- [ ] Add structured debug logging around all playback state transitions.
-- [ ] Add explicit stop reasons for manual `skip` and `stop`.
-- [ ] Record passive incident snapshots that can be exported later.
-- [ ] Track timing fields like `started_at`, `elapsed`, and expected duration.
+- [x] Add structured debug logging around all playback state transitions.
+- [x] Add explicit stop reasons for manual `skip` and `stop`.
+- [x] Record passive incident snapshots that can be exported later.
+- [x] Track timing fields like `started_at`, `elapsed`, and expected duration.
 - [ ] Add a manual “mark current audio state” command for user-triggered debug bookmarks.
 
 ## Utility and Admin Commands

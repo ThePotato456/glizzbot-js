@@ -3,6 +3,13 @@ import type { BotCommand } from "../types.js";
 import type { GlizzBot } from "../bot.js";
 import { buildTrackEmbed, createMusicEmbed } from "./musicEmbeds.js";
 
+const PLAYRANDOM_MAX = 10;
+
+interface PlayrandomTarget {
+  userId: string;
+  historyLabel: string;
+}
+
 function buildQueueEmbed(bot: GlizzBot, guildId: string): EmbedBuilder {
   const state = bot.music.getState(guildId);
   if (state.queue.length === 0) {
@@ -23,6 +30,68 @@ async function replyWithMusicEmbed(
     return;
   }
   await ctx.message.reply({ embeds: [embed] });
+}
+
+function normalizeHistoryUrl(songRef: string): string | null {
+  const normalized = String(songRef ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(normalized)) {
+    return normalized;
+  }
+  return `https://www.youtube.com/watch?v=${normalized}`;
+}
+
+function describeUserName(
+  user: { username?: string; globalName?: string | null; tag?: string } | null | undefined,
+  fallbackId?: string,
+): string {
+  if (user?.globalName?.trim()) {
+    return user.globalName.trim();
+  }
+  if (user?.username?.trim()) {
+    return user.username.trim();
+  }
+  if (user?.tag?.includes("#")) {
+    return user.tag.slice(0, user.tag.indexOf("#"));
+  }
+  if (user?.tag?.trim()) {
+    return user.tag.trim();
+  }
+  return fallbackId ? `user ${fallbackId}` : "Unknown";
+}
+
+function parsePlayrandomTarget(ctx: Parameters<BotCommand["execute"]>[0]): PlayrandomTarget | null {
+  const rawTarget = ctx.args[1];
+  if (!rawTarget) {
+    return {
+      userId: ctx.message.author.id,
+      historyLabel: `${describeUserName(ctx.message.author)}'s history`,
+    };
+  }
+
+  const mentionMatch = rawTarget.match(/^<@!?(\d+)>$/);
+  const mentionedUser = ctx.message.mentions.users.first?.() ?? null;
+  if (mentionMatch) {
+    const userId = mentionMatch[1];
+    const labelSource = mentionedUser && mentionedUser.id === userId ? mentionedUser : null;
+    return {
+      userId,
+      historyLabel: `${describeUserName(labelSource, userId)}'s history`,
+    };
+  }
+
+  if (/^\d+$/.test(rawTarget)) {
+    const cachedMember = ctx.guild?.members.cache.get(rawTarget)?.user;
+    const cachedUser = ctx.message.client?.users.cache.get(rawTarget);
+    return {
+      userId: rawTarget,
+      historyLabel: `${describeUserName(cachedMember ?? cachedUser, rawTarget)}'s history`,
+    };
+  }
+
+  return null;
 }
 
 export function createMusicCommands(bot: GlizzBot): BotCommand[] {
@@ -133,6 +202,81 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           ? buildTrackEmbed("Queued Song", firstItem).setFooter({ text: `Added ${items.length} item(s) to the queue.` })
           : createMusicEmbed(`Added ${items.length} item(s) to the queue.`);
         await replyWithMusicEmbed(ctx, embed);
+      },
+    },
+    {
+      name: "playrandom",
+      cog: "music",
+      description: "Queue random songs from saved history.",
+      guildOnly: true,
+      async execute(ctx) {
+        if (!ctx.guild || !ctx.member || ctx.args.length === 0 || ctx.args.length > 2) {
+          await ctx.reply("Usage: playrandom <number> [@user/user_id]");
+          return;
+        }
+
+        const amount = Number.parseInt(ctx.args[0] ?? "", 10);
+        if (Number.isNaN(amount) || amount < 1) {
+          await ctx.reply("Usage: playrandom <number> [@user/user_id]");
+          return;
+        }
+        if (amount > PLAYRANDOM_MAX) {
+          await ctx.reply(`You can only play up to ${PLAYRANDOM_MAX} random songs at a time!`);
+          return;
+        }
+
+        const target = parsePlayrandomTarget(ctx);
+        if (!target) {
+          await ctx.reply("Usage: playrandom <number> [@user/user_id]");
+          return;
+        }
+
+        const historyRows = bot.music.getRandomHistory(amount, target.userId);
+        if (historyRows.length === 0) {
+          await ctx.reply(`No songs found in ${target.historyLabel}!`);
+          return;
+        }
+
+        const queueItems = historyRows.flatMap((row) => {
+          const url = normalizeHistoryUrl(row.song_url);
+          if (!url) {
+            return [];
+          }
+          return [{
+            title: row.song_title || url,
+            url,
+            requestedBy: ctx.message.author.id,
+            isResolved: false,
+            sourceType: "url" as const,
+            resolverNote: `Queued from ${target.historyLabel}. Stream will resolve before playback.`,
+          }];
+        });
+
+        if (queueItems.length === 0) {
+          await ctx.reply(`No playable songs found in ${target.historyLabel}!`);
+          return;
+        }
+
+        await bot.music.ensureVoiceConnection(ctx.member, ctx.channel.id);
+        const state = bot.music.getState(ctx.guild.id);
+        const hadActiveTrack = Boolean(state.current);
+        const queued = queueItems.map((item) => bot.music.enqueue(ctx.guild!.id, item));
+
+        if (!hadActiveTrack) {
+          const started = await bot.music.advancePlayback(ctx.guild.id, bot.musicResolver);
+          if (!started) {
+            await ctx.reply(`No playable songs found in ${target.historyLabel}!`);
+            return;
+          }
+          const embed = buildTrackEmbed("Now Playing", started);
+          if (queued.length > 1) {
+            embed.setFooter({ text: `Queued ${queued.length - 1} more random track(s) from ${target.historyLabel}.` });
+          }
+          await replyWithMusicEmbed(ctx, embed);
+          return;
+        }
+
+        await replyWithMusicEmbed(ctx, createMusicEmbed(`Queued ${queued.length} random song(s) from ${target.historyLabel}.`));
       },
     },
     {

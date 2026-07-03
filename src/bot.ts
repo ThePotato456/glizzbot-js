@@ -47,6 +47,10 @@ export class GlizzBot extends Client {
       config.music.idleDisconnectMs,
       config.music.shouldLeaveWhenIdle,
       config.music.timingDebugDefault,
+      {
+        databaseFile: paths.databaseFile,
+        legacyDatabaseFile: paths.legacyDatabaseFile,
+      },
     );
     this.logger.debug(`Voice dependency report:\n${this.music.getDependencyReport()}`);
     this.music.setTrackFinishedHandler(async (guildId) => {

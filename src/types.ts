@@ -46,6 +46,7 @@ export interface RuntimePaths {
   configDir: string;
   configFile: string;
   databaseFile: string;
+  legacyDatabaseFile: string;
   downloadsDir: string;
   tempDir: string;
   ytdlpTempDir: string;
