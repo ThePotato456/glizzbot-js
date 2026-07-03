@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 import { createMusicCommands } from "../../src/commands/music.js";
 import type { BotCommand, CommandContext, MusicState, QueueItem } from "../../src/types.js";
 
+interface ReplyRecord {
+  content?: string;
+  embeds?: Array<{ data?: { description?: string; footer?: { text?: string } } }>;
+}
+
 function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "id" | "addedAt"> {
   return {
     title: "Resolved Track",
@@ -16,18 +21,27 @@ function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "i
 }
 
 function createCommandContext(overrides: Partial<CommandContext> = {}) {
-  const replies: string[] = [];
+  const replies: ReplyRecord[] = [];
+  const message = {
+    author: { id: "user-1", tag: "tester#0001" },
+    reply: async (payload: string | { embeds?: ReplyRecord["embeds"] }) => {
+      if (typeof payload === "string") {
+        replies.push({ content: payload });
+      } else {
+        replies.push({ embeds: payload.embeds });
+      }
+      return {} as never;
+    },
+  };
   const ctx: CommandContext = {
-    message: {
-      author: { id: "user-1", tag: "tester#0001" },
-    } as never,
+    message: message as never,
     args: [],
     rawArgs: "",
     guild: { id: "guild-1" } as never,
     member: { voice: { channelId: "voice-1" } } as never,
     channel: { id: "text-1" } as never,
     reply: async (content: string) => {
-      replies.push(content);
+      replies.push({ content });
       return {} as never;
     },
     ...overrides,
@@ -126,7 +140,7 @@ test("play replies with usage when no query or url is provided", async () => {
 
   await command.execute(ctx);
 
-  assert.deepEqual(replies, ["Usage: play <query or url>"]);
+  assert.deepEqual(replies, [{ content: "Usage: play <query or url>" }]);
 });
 
 test("play connects, resolves, and starts playback when nothing is active", async () => {
@@ -140,7 +154,7 @@ test("play connects, resolves, and starts playback when nothing is active", asyn
   assert.equal(calls.resolveInput, 1);
   assert.equal(calls.enqueue, 1);
   assert.equal(calls.advancePlayback, 1);
-  assert.match(replies[0] ?? "", /Queued and started: \*\*Resolved Track\*\*/);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "**__Now Playing:__**\n\t\tResolved Track");
 });
 
 test("play returns the resolver summary without joining voice when nothing is queueable", async () => {
@@ -161,7 +175,7 @@ test("play returns the resolver summary without joining voice when nothing is qu
   assert.equal(calls.ensureVoiceConnection, 0);
   assert.equal(calls.enqueue, 0);
   assert.equal(calls.advancePlayback, 0);
-  assert.deepEqual(replies, ["YouTube playlist URLs are not supported yet. Use a single video URL or a search query."]);
+  assert.deepEqual(replies, [{ content: "YouTube playlist URLs are not supported yet. Use a single video URL or a search query." }]);
 });
 
 test("pause and resume commands return friendly success replies", async () => {
@@ -177,8 +191,8 @@ test("pause and resume commands return friendly success replies", async () => {
 
   assert.equal(calls.pause, 1);
   assert.equal(calls.resume, 1);
-  assert.deepEqual(pauseCtx.replies, ["Paused playback."]);
-  assert.deepEqual(resumeCtx.replies, ["Resumed playback."]);
+  assert.equal(pauseCtx.replies[0]?.embeds?.[0]?.data?.description, "Paused playback.");
+  assert.equal(resumeCtx.replies[0]?.embeds?.[0]?.data?.description, "Resumed playback.");
 });
 
 test("skip replies with the next track title when one exists", async () => {
@@ -189,7 +203,7 @@ test("skip replies with the next track title when one exists", async () => {
   await command.execute(ctx);
 
   assert.equal(calls.skip, 1);
-  assert.deepEqual(replies, ["Skipped. Next up: **Next Track**"]);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "Skipped current track!");
 });
 
 test("play queues without advancing when a track is already active", async () => {
@@ -204,7 +218,8 @@ test("play queues without advancing when a track is already active", async () =>
   assert.equal(calls.resolveInput, 1);
   assert.equal(calls.enqueue, 1);
   assert.equal(calls.advancePlayback, 0);
-  assert.match(replies[0] ?? "", /Added 1 item\(s\) to the queue\./);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "**__Queued Song:__**\nResolved Track");
+  assert.equal(replies[0]?.embeds?.[0]?.data?.footer?.text, "Added 1 item(s) to the queue.");
 });
 
 test("skip reports an empty queue when nothing else can play", async () => {
@@ -219,5 +234,5 @@ test("skip reports an empty queue when nothing else can play", async () => {
   await command.execute(ctx);
 
   assert.equal(calls.skip, 1);
-  assert.deepEqual(replies, ["Skipped. Queue is now empty."]);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "Nothing is playing!");
 });

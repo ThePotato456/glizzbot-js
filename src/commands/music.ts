@@ -1,6 +1,44 @@
-import { ChannelType, PermissionsBitField } from "discord.js";
+import { ChannelType, EmbedBuilder, PermissionsBitField } from "discord.js";
 import type { BotCommand } from "../types.js";
 import type { GlizzBot } from "../bot.js";
+import { formatDuration, toCurveText } from "../utils/format.js";
+
+const MUSIC_EMBED_TITLE = toCurveText("MusicBot");
+
+function createMusicEmbed(description: string): EmbedBuilder {
+  return new EmbedBuilder()
+    .setTitle(MUSIC_EMBED_TITLE)
+    .setDescription(description);
+}
+
+function buildTrackEmbed(
+  title: string,
+  track: { title: string; requestedBy?: string; durationSeconds?: number },
+): EmbedBuilder {
+  return createMusicEmbed(`**__${title}:__**\n${title === "Now Playing" ? "\t\t" : ""}${track.title}`)
+    .addFields(
+      { name: toCurveText("Queued By"), value: track.requestedBy || "Unknown", inline: true },
+      { name: toCurveText("Song Length"), value: formatDuration(track.durationSeconds), inline: true },
+    );
+}
+
+function buildQueueEmbed(bot: GlizzBot, guildId: string): EmbedBuilder {
+  const state = bot.music.getState(guildId);
+  if (state.queue.length === 0) {
+    return createMusicEmbed("The queue is empty!");
+  }
+
+  const lines = state.queue.map((item, index) => `${index + 1}. ${item.title}`);
+  return createMusicEmbed(`**__Queue:__**\n${lines.join("\n")}`)
+    .setFooter({ text: `${state.queue.length} queued track(s)` });
+}
+
+async function replyWithMusicEmbed(
+  ctx: Parameters<BotCommand["execute"]>[0],
+  embed: EmbedBuilder,
+): Promise<void> {
+  await ctx.message.reply({ embeds: [embed] });
+}
 
 export function createMusicCommands(bot: GlizzBot): BotCommand[] {
   return [
@@ -15,7 +53,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           return;
         }
         await bot.music.ensureVoiceConnection(ctx.member, ctx.channel.id);
-        await ctx.reply(`Joined <#${ctx.member.voice.channelId}>.`);
+        await replyWithMusicEmbed(ctx, createMusicEmbed(`Joined <#${ctx.member.voice.channelId}>.`));
       },
     },
     {
@@ -66,7 +104,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       guildOnly: true,
       async execute(ctx) {
         bot.music.disconnect(ctx.guild!.id, "manual-leave");
-        await ctx.reply("Disconnected from voice.");
+        await replyWithMusicEmbed(ctx, createMusicEmbed("Disconnected from voice."));
       },
     },
     {
@@ -94,10 +132,18 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
         const state = bot.music.getState(ctx.guild.id);
         if (!state.current) {
           const started = await bot.music.advancePlayback(ctx.guild.id, bot.musicResolver);
-          await ctx.reply(started ? `Queued and started: **${started.title}**\n${resolved.summary}` : resolved.summary);
+          if (started) {
+            await replyWithMusicEmbed(ctx, buildTrackEmbed("Now Playing", started));
+          } else {
+            await ctx.reply(resolved.summary);
+          }
           return;
         }
-        await ctx.reply(`${resolved.summary}\nAdded ${items.length} item(s) to the queue.`);
+        const firstItem = items[0];
+        const embed = firstItem
+          ? buildTrackEmbed("Queued Song", firstItem).setFooter({ text: `Added ${items.length} item(s) to the queue.` })
+          : createMusicEmbed(`Added ${items.length} item(s) to the queue.`);
+        await replyWithMusicEmbed(ctx, embed);
       },
     },
     {
@@ -107,7 +153,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       description: "Show the queue.",
       guildOnly: true,
       async execute(ctx) {
-        await ctx.reply(`${bot.music.getVoiceSummary(ctx.guild!.id)}\n${bot.music.queueSummary(ctx.guild!.id)}`);
+        await replyWithMusicEmbed(ctx, buildQueueEmbed(bot, ctx.guild!.id));
       },
     },
     {
@@ -117,7 +163,12 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       description: "Show the active track.",
       guildOnly: true,
       async execute(ctx) {
-        await ctx.reply(bot.music.describeNowPlaying(ctx.guild!.id));
+        const state = bot.music.getState(ctx.guild!.id);
+        if (!state.current) {
+          await replyWithMusicEmbed(ctx, createMusicEmbed("Nothing is playing!"));
+          return;
+        }
+        await replyWithMusicEmbed(ctx, buildTrackEmbed("Now Playing", state.current));
       },
     },
     {
@@ -128,7 +179,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       guildOnly: true,
       async execute(ctx) {
         const next = await bot.music.skip(ctx.guild!.id, "manual-skip", bot.musicResolver);
-        await ctx.reply(next ? `Skipped. Next up: **${next.title}**` : "Skipped. Queue is now empty.");
+        await replyWithMusicEmbed(ctx, createMusicEmbed(next ? "Skipped current track!" : "Nothing is playing!"));
       },
     },
     {
@@ -138,7 +189,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       guildOnly: true,
       async execute(ctx) {
         bot.music.stop(ctx.guild!.id, "manual-stop");
-        await ctx.reply("Stopped playback and cleared the queue. Idle disconnect will follow if enabled.");
+        await replyWithMusicEmbed(ctx, createMusicEmbed("Stopped playback and cleared queue!"));
       },
     },
     {
@@ -148,7 +199,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       guildOnly: true,
       async execute(ctx) {
         const paused = bot.music.pause(ctx.guild!.id);
-        await ctx.reply(paused ? "Paused playback." : "Nothing is currently playing that can be paused.");
+        await replyWithMusicEmbed(ctx, createMusicEmbed(paused ? "Paused playback." : "Nothing is playing!"));
       },
     },
     {
@@ -158,7 +209,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       guildOnly: true,
       async execute(ctx) {
         const resumed = bot.music.resume(ctx.guild!.id);
-        await ctx.reply(resumed ? "Resumed playback." : "Nothing is currently paused.");
+        await replyWithMusicEmbed(ctx, createMusicEmbed(resumed ? "Resumed playback." : "Nothing is playing!"));
       },
     },
     {
@@ -168,7 +219,10 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       guildOnly: true,
       async execute(ctx) {
         const cleared = bot.music.clear(ctx.guild!.id);
-        await ctx.reply(`Cleared ${cleared} queued track(s).`);
+        await replyWithMusicEmbed(
+          ctx,
+          createMusicEmbed(cleared > 0 ? "Cleared song queue!" : "The queue is empty!"),
+        );
       },
     },
     {
@@ -179,7 +233,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       guildOnly: true,
       async execute(ctx) {
         bot.music.shuffle(ctx.guild!.id);
-        await ctx.reply("Shuffled the queue.");
+        await replyWithMusicEmbed(ctx, createMusicEmbed("Shuffled queue"));
       },
     },
     {
@@ -190,7 +244,11 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       async execute(ctx) {
         const index = Number.parseInt(ctx.args[0] ?? "", 10) - 1;
         const removed = bot.music.remove(ctx.guild!.id, index);
-        await ctx.reply(removed ? `Removed **${removed.title}**.` : "Queue index out of range.");
+        if (!removed) {
+          await ctx.reply("Queue index out of range.");
+          return;
+        }
+        await replyWithMusicEmbed(ctx, createMusicEmbed(`Removing: ${removed.title}`));
       },
     },
     {
@@ -212,7 +270,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           return;
         }
         const item = bot.music.insert(ctx.guild!.id, index, first);
-        await ctx.reply(`Inserted **${item.title}** at position ${index + 1}.`);
+        await replyWithMusicEmbed(ctx, buildTrackEmbed("Inserted Next", item));
       },
     },
     {
@@ -223,7 +281,10 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       async execute(ctx) {
         const state = bot.music.getState(ctx.guild!.id);
         state.shouldLeave = !state.shouldLeave;
-        await ctx.reply(`Idle disconnect is now ${state.shouldLeave ? "enabled" : "disabled"}.`);
+        await replyWithMusicEmbed(
+          ctx,
+          createMusicEmbed(state.shouldLeave ? "Bot will leave after queue finishes!" : "Bot will stay after queue finishes!"),
+        );
       },
     },
     {
@@ -234,7 +295,10 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       async execute(ctx) {
         const state = bot.music.getState(ctx.guild!.id);
         state.timingDebug = !state.timingDebug;
-        await ctx.reply(`Timing debug is now ${state.timingDebug ? "enabled" : "disabled"}.`);
+        await replyWithMusicEmbed(
+          ctx,
+          createMusicEmbed(`Operation timing display ${state.timingDebug ? "enabled" : "disabled"}!`),
+        );
       },
     },
     {
@@ -245,7 +309,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       async execute(ctx) {
         const note = ctx.rawArgs || `Marked by ${ctx.message.author.tag}`;
         bot.music.mark(ctx.guild!.id, note);
-        await ctx.reply("Marked the current music state for debug export.");
+        await replyWithMusicEmbed(ctx, createMusicEmbed("Marked current audio state for debug export."));
       },
     },
   ];
