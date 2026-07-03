@@ -18,7 +18,7 @@ export function buildCommands(bot: GlizzBot): BotCommand[] {
     ...createMusicCommands(bot),
     ...createUtilityCommands(bot),
     ...createEventCommands(bot),
-    ...createSoundCommands(bot),
+    ...createSoundCommands(),
     ...createRecordCommands(),
     ...createChatCommands(bot),
     ...createYtdlpCommands(),

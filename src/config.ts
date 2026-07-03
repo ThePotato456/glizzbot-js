@@ -14,7 +14,7 @@ const DEFAULT_GUILD_CONFIG: GuildConfig = {
 const DEFAULT_CONFIG: AppConfig = {
   debug: true,
   prefix: "!",
-  enabledCogs: ["manager", "music", "utility", "events", "sound", "record", "chat", "ytdlp", "webPanel"],
+  enabledCogs: ["manager", "music", "utility", "events", "record", "chat", "ytdlp", "webPanel"],
   discord: {
     token: "",
     ownerId: "",

@@ -11,7 +11,6 @@ import { MusicService } from "./services/musicService.js";
 import { MusicResolverService } from "./services/musicResolverService.js";
 import { ChatService } from "./services/chatService.js";
 import { EventsService } from "./services/eventsService.js";
-import { SoundService } from "./services/soundService.js";
 import type { AppConfig, BotCommand, CommandContext, RuntimePaths } from "./types.js";
 import { buildCommands } from "./commands/index.js";
 import { startWebPanel } from "./web/panel.js";
@@ -19,10 +18,9 @@ import { startWebPanel } from "./web/panel.js";
 export class GlizzBot extends Client {
   readonly commands = new Collection<string, BotCommand>();
   readonly music: MusicService;
-  readonly musicResolver = new MusicResolverService();
+  readonly musicResolver: MusicResolverService;
   readonly chat = new ChatService();
   readonly events = new EventsService();
-  readonly sounds: SoundService;
   readonly configStore: ConfigStore;
   readonly logger: AppLogger;
   private lagMs = 0;
@@ -43,12 +41,16 @@ export class GlizzBot extends Client {
 
     this.configStore = new ConfigStore(paths);
     this.logger = new AppLogger(paths, config.debug);
+    this.musicResolver = new MusicResolverService(paths);
     this.music = new MusicService(
       config.music.idleDisconnectMs,
       config.music.shouldLeaveWhenIdle,
       config.music.timingDebugDefault,
     );
-    this.sounds = new SoundService(paths);
+    this.logger.debug(`Voice dependency report:\n${this.music.getDependencyReport()}`);
+    this.music.setTrackFinishedHandler(async (guildId) => {
+      await this.music.advancePlayback(guildId, this.musicResolver);
+    });
   }
 
   async bootstrap(): Promise<void> {
@@ -82,7 +84,7 @@ export class GlizzBot extends Client {
   }
 
   private registerEventHandlers(): void {
-    this.once("ready", () => {
+    this.once("clientReady", () => {
       this.logger.info(`Logged in as ${this.user?.tag ?? "unknown user"}`);
     });
 
@@ -153,7 +155,8 @@ export class GlizzBot extends Client {
     } catch (error) {
       const details = error instanceof Error ? error.stack ?? error.message : String(error);
       this.logger.error(`command error: ${command.name}: ${details}`);
-      await message.reply("That command failed. Check logs or the web panel for details.");
+      const userMessage = this.getUserFacingCommandError(error);
+      await message.reply(userMessage);
     }
   }
 
@@ -164,5 +167,28 @@ export class GlizzBot extends Client {
       this.lagMs = Math.max(0, now - expected);
       expected = now + 1000;
     }, 1000).unref();
+  }
+
+  private getUserFacingCommandError(error: unknown): string {
+    if (!(error instanceof Error)) {
+      return "That command failed. Check logs or the web panel for details.";
+    }
+
+    const userFacingPrefixes = [
+      "Join a voice channel first.",
+      "Stage voice channels are not supported yet.",
+      "Your voice channel is full, so I cannot join it.",
+      "Discord reports that I cannot join that voice channel.",
+      "Discord reports that I cannot speak in that voice channel.",
+      "Discord rejected the voice connection because this channel requires DAVE end-to-end encryption",
+      "I do not have permission to view that voice channel.",
+      "I do not have permission to connect to that voice channel.",
+      "I do not have permission to speak in that voice channel.",
+      "Could not connect to your voice channel before timeout.",
+    ];
+
+    return userFacingPrefixes.some((prefix) => error.message.startsWith(prefix))
+      ? error.message
+      : "That command failed. Check logs or the web panel for details.";
   }
 }

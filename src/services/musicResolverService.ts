@@ -1,15 +1,19 @@
 import type { QueueItem, QueueSourceType } from "../types.js";
+import type { RuntimePaths } from "../types.js";
+import { YtDlpService, type YtDlpRunner } from "./ytdlpService.js";
 
 export interface ResolvedQueueRequest {
   items: Array<Omit<QueueItem, "id" | "addedAt">>;
   summary: string;
 }
 
+type DetectedSourceType = QueueSourceType | "spotifyPlaylist" | "spotifyAlbum" | "youtubePlaylist";
+
 function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }
 
-function detectSourceType(query: string): QueueSourceType {
+function detectSourceType(query: string): DetectedSourceType {
   if (!isHttpUrl(query)) {
     return "search";
   }
@@ -59,128 +63,123 @@ function buildBaseItem(
 }
 
 export class MusicResolverService {
+  private readonly ytdlp: YtDlpService;
+
+  constructor(private readonly paths: RuntimePaths, runner: YtDlpRunner | null = null) {
+    this.ytdlp = new YtDlpService(paths, runner);
+  }
+
   async resolveInput(query: string, requestedBy: string): Promise<ResolvedQueueRequest> {
     const normalized = query.trim();
     const sourceType = detectSourceType(normalized);
 
     switch (sourceType) {
       case "search":
-        return {
-          items: [
-            buildBaseItem(
-              `Search: ${normalized}`,
-              normalized,
-              requestedBy,
-              "search",
-              false,
-              "Plain text searches stay unresolved until playback so the queue stays responsive.",
-            ),
-          ],
-          summary: `Queued search query: **${normalized}**`,
-        };
+        return this.resolveViaYtDlp(normalized, requestedBy, "search");
       case "spotify":
-        return {
-          items: [
-            buildBaseItem(
-              `Spotify track: ${normalized}`,
-              normalized,
-              requestedBy,
-              "spotify",
-              false,
-              "Spotify tracks need a YouTube match step before playback.",
-            ),
-          ],
-          summary: "Queued 1 Spotify track for lazy resolution.",
-        };
+        return this.resolveViaYtDlp(normalized, requestedBy, "spotify");
       case "spotifyPlaylist":
         return {
-          items: [
-            buildBaseItem(
-              `Spotify playlist: ${normalized}`,
-              normalized,
-              requestedBy,
-              "spotifyPlaylist",
-              false,
-              "Playlist expansion is deferred until a Spotify adapter is configured.",
-            ),
-          ],
-          summary: "Queued a Spotify playlist placeholder.",
+          items: [],
+          summary: "Spotify playlist URLs are not supported yet. Use `play <query or url>` with a single track or search query.",
         };
       case "spotifyAlbum":
         return {
-          items: [
-            buildBaseItem(
-              `Spotify album: ${normalized}`,
-              normalized,
-              requestedBy,
-              "spotifyAlbum",
-              false,
-              "Album expansion is deferred until a Spotify adapter is configured.",
-            ),
-          ],
-          summary: "Queued a Spotify album placeholder.",
+          items: [],
+          summary: "Spotify album URLs are not supported yet. Use `play <query or url>` with a single track or search query.",
         };
       case "youtubePlaylist":
         return {
-          items: [
-            buildBaseItem(
-              `YouTube playlist: ${normalized}`,
-              normalized,
-              requestedBy,
-              "youtubePlaylist",
-              false,
-              "Playlist items are kept lazy so large collections do not block command handling.",
-            ),
-          ],
-          summary: "Queued a YouTube playlist placeholder.",
+          items: [],
+          summary: "YouTube playlist URLs are not supported yet. Use a single video URL or a search query.",
         };
       case "url":
       default:
-        return {
-          items: [
-            buildBaseItem(normalized, normalized, requestedBy, "url", true),
-          ],
-          summary: `Queued direct URL: **${normalized}**`,
-        };
+        return this.resolveViaYtDlp(normalized, requestedBy, "url");
     }
   }
 
   async resolveQueueItem(item: QueueItem): Promise<QueueItem> {
     if (item.isResolved) {
-      return item;
+      return this.prepareResolvedItem(item);
     }
 
     switch (item.sourceType) {
       case "search":
-        return {
-          ...item,
-          title: item.title.startsWith("Search: ") ? item.title.slice("Search: ".length) : item.title,
-          streamUrl: `ytsearch:${item.url}`,
-          isResolved: true,
-          resolverNote: "Resolved as a deferred search placeholder.",
-        };
+        return this.prepareResolvedItem(item);
       case "spotify":
-        return {
-          ...item,
-          streamUrl: `spotify-match:${item.url}`,
-          isResolved: true,
-          resolverNote: "Resolved to a placeholder Spotify-to-YouTube match target.",
-        };
+        return this.prepareResolvedItem(item);
       case "spotifyPlaylist":
       case "spotifyAlbum":
       case "youtubePlaylist":
         return {
           ...item,
-          streamUrl: item.url,
           isResolved: true,
-          resolverNote: "Resolved from a lazy collection placeholder.",
+          resolverNote: "Playlist and collection expansion are not configured yet.",
         };
       default:
-        return {
-          ...item,
-          streamUrl: item.url,
-          isResolved: true,
-        };
+        return this.prepareResolvedItem(item);
+    }
+  }
+
+  private async resolveViaYtDlp(
+    input: string,
+    requestedBy: string,
+    sourceType: QueueSourceType,
+  ): Promise<ResolvedQueueRequest> {
+    try {
+      const prepared = await this.ytdlp.resolve(input, sourceType);
+      return {
+        items: [
+          {
+            title: prepared.title,
+            url: prepared.webpageUrl ?? prepared.input,
+            requestedBy,
+            durationSeconds: prepared.durationSeconds,
+            isResolved: true,
+            sourceType,
+            streamUrl: prepared.streamUrl,
+            resolverNote: `Resolved stream with yt-dlp${prepared.extractor ? ` (${prepared.extractor})` : ""}.`,
+          },
+        ],
+        summary: `Resolved with yt-dlp: **${prepared.title}**`,
+      };
+    } catch (error) {
+      return {
+        items: [
+          buildBaseItem(
+            input,
+            input,
+            requestedBy,
+            sourceType,
+            false,
+            `yt-dlp prepare failed and will be retried on playback: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        ],
+        summary: `Queued ${sourceType === "search" ? "query" : "URL"} for yt-dlp resolution on playback.`,
+      };
+    }
+  }
+
+  private async prepareResolvedItem(item: QueueItem): Promise<QueueItem> {
+    try {
+      const prepared = await this.ytdlp.resolve(item.url, item.sourceType);
+      return {
+        ...item,
+        title: prepared.title,
+        durationSeconds: prepared.durationSeconds ?? item.durationSeconds,
+        streamUrl: prepared.streamUrl,
+        isResolved: true,
+        resolverNote: `Resolved stream with yt-dlp${prepared.extractor ? ` (${prepared.extractor})` : ""}.`,
+      };
+    } catch (error) {
+      return {
+        ...item,
+        isResolved: true,
+        resolverNote: item.resolverNote
+          ? `${item.resolverNote} yt-dlp failed: ${error instanceof Error ? error.message : String(error)}`
+          : `yt-dlp failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 }
