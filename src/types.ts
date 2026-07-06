@@ -12,6 +12,11 @@ export interface AppConfig {
   debug: boolean;
   prefix: string;
   enabledCogs: string[];
+  runtime: {
+    ffmpegPath: string;
+    ytDlpPath: string;
+    legacyDatabaseImportPath: string | null;
+  };
   discord: {
     token: string;
     ownerId: string;
@@ -46,7 +51,7 @@ export interface RuntimePaths {
   configDir: string;
   configFile: string;
   databaseFile: string;
-  legacyDatabaseFile: string;
+  legacyDatabaseFile?: string | null;
   downloadsDir: string;
   tempDir: string;
   ytdlpTempDir: string;
@@ -93,6 +98,7 @@ export interface QueueItem {
   isResolved: boolean;
   sourceType: QueueSourceType;
   streamUrl?: string;
+  streamHeaders?: Record<string, string>;
   resolverNote?: string;
   prefetchedAt?: number;
   addedAt: number;

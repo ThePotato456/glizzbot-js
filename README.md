@@ -20,8 +20,8 @@ The current build includes a custom DAVE-capable voice transport, yt-dlp-backed 
 ## Requirements
 
 - Node.js 22+
-- `ffmpeg` available on `PATH`
-- `yt-dlp` available on `PATH`
+- `ffmpeg` available on `PATH`, or configured explicitly
+- `yt-dlp` available on `PATH`, or configured explicitly
 
 ## Quick Start
 
@@ -95,10 +95,74 @@ The example config shows:
 
 - command prefix
 - enabled cogs
+- runtime binary paths and optional legacy DB import path
 - Discord credentials
 - music idle disconnect behavior
 - web panel settings
 - per-guild defaults
+
+The portable runtime block is:
+
+```json
+"runtime": {
+  "ffmpegPath": "ffmpeg",
+  "ytDlpPath": "yt-dlp",
+  "legacyDatabaseImportPath": null
+}
+```
+
+Notes:
+
+- `ffmpegPath` and `ytDlpPath` can be either command names on `PATH` or explicit relative/absolute paths.
+- `legacyDatabaseImportPath` is optional. If set, the bot will import that DB the first time local `config/database.db` is missing.
+- Environment overrides are supported:
+  - `FFMPEG_PATH`
+  - `YTDLP_PATH`
+  - `LEGACY_DATABASE_IMPORT_PATH`
+  - `DISCORD_TOKEN`
+  - `BOT_OWNER_ID`
+  - `WEB_PANEL_TOKEN`
+
+## Portability
+
+This repo is now set up so the application code itself is architecture-neutral. The host-specific pieces are:
+
+- Node runtime
+- `ffmpeg`
+- `yt-dlp`
+- your mounted config/database files
+
+For direct host installs, point `runtime.ffmpegPath` and `runtime.ytDlpPath` at the right binaries for that machine.
+
+For the easiest moveable deployment, use the included Docker image.
+
+### Docker
+
+Build locally:
+
+```bash
+docker build -t glizzbot-js .
+```
+
+Run with your config mounted:
+
+```bash
+docker run --rm \
+  -p 3000:3000 \
+  -v $(pwd)/config:/app/config \
+  glizzbot-js
+```
+
+For multi-arch builds with Buildx:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t your-registry/glizzbot-js:latest \
+  --push .
+```
+
+That gives you one image tag that can move between common x64 and ARM64 Linux hosts.
 
 ## Project Status
 

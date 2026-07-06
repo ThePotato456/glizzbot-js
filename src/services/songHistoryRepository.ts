@@ -19,7 +19,10 @@ CREATE TABLE IF NOT EXISTS song_history (
 );
 `;
 
-type SongHistoryRuntimePaths = Pick<RuntimePaths, "databaseFile" | "legacyDatabaseFile">;
+type SongHistoryRuntimePaths = {
+  databaseFile: RuntimePaths["databaseFile"];
+  legacyDatabaseFile?: string | null;
+};
 
 export interface SongHistoryRow {
   song_title: string;
@@ -103,7 +106,7 @@ export class SongHistoryRepository {
       return;
     }
 
-    if (fs.existsSync(this.paths.legacyDatabaseFile) && fs.lstatSync(this.paths.legacyDatabaseFile).isFile()) {
+    if (this.paths.legacyDatabaseFile && fs.existsSync(this.paths.legacyDatabaseFile) && fs.lstatSync(this.paths.legacyDatabaseFile).isFile()) {
       fs.copyFileSync(this.paths.legacyDatabaseFile, this.paths.databaseFile);
       return;
     }

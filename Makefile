@@ -1,8 +1,8 @@
 NODE ?= node
-NPM ?= npm.cmd
+NPM ?= npm
 TSC := $(NODE) ./node_modules/typescript/bin/tsc
 
-.PHONY: help install dev build run test test-watch typecheck clean reset-config
+.PHONY: help install dev build run test test-watch typecheck clean reset-config docker-build docker-run
 
 help:
 	@echo Available targets:
@@ -13,6 +13,8 @@ help:
 	@echo   make test          Run the automated test suite
 	@echo   make test-watch    Run tests in watch mode
 	@echo   make typecheck     Run the TypeScript compiler without emitting files
+	@echo   make docker-build  Build the container image
+	@echo   make docker-run    Run the container with the local config directory mounted
 	@echo   make clean         Remove build output
 	@echo   make reset-config  Copy example config if config/config.json is missing
 
@@ -36,6 +38,12 @@ test-watch:
 
 typecheck:
 	$(TSC) -p tsconfig.json --noEmit
+
+docker-build:
+	docker build -t glizzbot-js .
+
+docker-run:
+	docker run --rm -p 3000:3000 -v $(CURDIR)/config:/app/config glizzbot-js
 
 clean:
 	@if exist dist rmdir /s /q dist

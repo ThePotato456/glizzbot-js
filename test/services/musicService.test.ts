@@ -183,6 +183,79 @@ test("handlePlaybackFailure leaves the guild idle when no fallback track exists"
   assert.match(state.incidentMarks.at(-1)?.note ?? "", /stream disconnected/);
 });
 
+test("advancePlayback skips unplayable items instead of keeping them queued", async () => {
+  const service = new MusicService(1000, true, false);
+  service.enqueue("guild-1", createQueueItem({ title: "Retry Later", sourceType: "url" }));
+  service.enqueue("guild-1", createQueueItem({ title: "Still Queued", sourceType: "url" }));
+
+  const next = await service.advancePlayback("guild-1", {
+    resolveQueueItem: async (item) => ({
+      ...item,
+      isResolved: false,
+      resolverNote: `temporary failure for ${item.title}`,
+    }),
+  } as never);
+
+  const state = service.getState("guild-1");
+  assert.equal(next, null);
+  assert.equal(state.current, null);
+  assert.equal(state.queue.length, 0);
+});
+
+test("advancePlayback skips failed items and still progresses to a later playable track", async () => {
+  const service = new MusicService(1000, true, false);
+  service.enqueue("guild-1", createQueueItem({ title: "Retry Later", sourceType: "url" }));
+  service.enqueue("guild-1", createQueueItem({ title: "Playable Next", sourceType: "url" }));
+
+  const started = await service.advancePlayback("guild-1", {
+    resolveQueueItem: async (item) => {
+      if (item.title === "Retry Later") {
+        return {
+          ...item,
+          isResolved: false,
+          resolverNote: "temporary extractor failure",
+        };
+      }
+      return {
+        ...item,
+        isResolved: true,
+        streamUrl: "https://media.example/playable-next",
+      };
+    },
+  } as never);
+
+  const state = service.getState("guild-1");
+  assert.ok(started);
+  assert.equal(started?.title, "Playable Next");
+  assert.equal(state.current?.title, "Playable Next");
+  assert.equal(state.queue.length, 0);
+});
+
+test("buildFfmpegArgs forwards yt-dlp stream headers to ffmpeg input options", () => {
+  const service = new MusicService(1000, true, false);
+
+  const args = (service as any).buildFfmpegArgs({
+    id: "q1",
+    title: "Header Track",
+    url: "https://example.com/watch?v=1",
+    requestedBy: "user-1",
+    isResolved: true,
+    sourceType: "url",
+    streamUrl: "https://media.example/stream",
+    streamHeaders: {
+      "User-Agent": "GlizzBot Test Agent",
+      Referer: "https://example.com/",
+    },
+    addedAt: Date.now(),
+  } satisfies QueueItem) as string[];
+
+  assert.ok(args.includes("-user_agent"));
+  assert.ok(args.includes("GlizzBot Test Agent"));
+  const headersIndex = args.indexOf("-headers");
+  assert.ok(headersIndex >= 0);
+  assert.match(args[headersIndex + 1] ?? "", /Referer: https:\/\/example.com\//);
+});
+
 test("stop schedules idle disconnect when the guild should leave and voice is connected", async () => {
   const service = new MusicService(20, true, false);
   const state = service.getState("guild-1");

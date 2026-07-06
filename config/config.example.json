@@ -11,6 +11,11 @@
     "ytdlp",
     "webPanel"
   ],
+  "runtime": {
+    "ffmpegPath": "ffmpeg",
+    "ytDlpPath": "yt-dlp",
+    "legacyDatabaseImportPath": null
+  },
   "discord": {
     "token": "",
     "ownerId": "",

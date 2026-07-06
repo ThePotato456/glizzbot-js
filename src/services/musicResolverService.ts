@@ -65,8 +65,12 @@ function buildBaseItem(
 export class MusicResolverService {
   private readonly ytdlp: YtDlpService;
 
-  constructor(private readonly paths: RuntimePaths, runner: YtDlpRunner | null = null) {
-    this.ytdlp = new YtDlpService(paths, runner);
+  constructor(
+    private readonly paths: RuntimePaths,
+    runner: YtDlpRunner | null = null,
+    executablePath = "yt-dlp",
+  ) {
+    this.ytdlp = new YtDlpService(paths, runner, executablePath);
   }
 
   async resolveInput(query: string, requestedBy: string): Promise<ResolvedQueueRequest> {
@@ -97,6 +101,10 @@ export class MusicResolverService {
   }
 
   async resolveQueueItem(item: QueueItem): Promise<QueueItem> {
+    if (item.isResolved && item.streamUrl) {
+      return item;
+    }
+
     if (item.isResolved) {
       return this.prepareResolvedItem(item);
     }
@@ -136,6 +144,7 @@ export class MusicResolverService {
             isResolved: true,
             sourceType,
             streamUrl: prepared.streamUrl,
+            streamHeaders: prepared.streamHeaders,
             resolverNote: `Resolved stream with yt-dlp${prepared.extractor ? ` (${prepared.extractor})` : ""}.`,
           },
         ],
@@ -198,13 +207,14 @@ export class MusicResolverService {
         title: prepared.title,
         durationSeconds: prepared.durationSeconds ?? item.durationSeconds,
         streamUrl: prepared.streamUrl,
+        streamHeaders: prepared.streamHeaders,
         isResolved: true,
         resolverNote: `Resolved stream with yt-dlp${prepared.extractor ? ` (${prepared.extractor})` : ""}.`,
       };
     } catch (error) {
       return {
         ...item,
-        isResolved: true,
+        isResolved: false,
         resolverNote: item.resolverNote
           ? `${item.resolverNote} yt-dlp failed: ${error instanceof Error ? error.message : String(error)}`
           : `yt-dlp failed: ${error instanceof Error ? error.message : String(error)}`,

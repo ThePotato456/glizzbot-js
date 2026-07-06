@@ -26,16 +26,18 @@ export class MusicService {
   private readonly diagnostics = new Map<string, string[]>();
   private onTrackFinished: ((guildId: string) => Promise<void>) | null = null;
   private readonly songHistory: SongHistoryRepository | null;
+  private readonly ffmpegPath: string;
 
   constructor(
     private readonly idleDisconnectMs: number,
     private readonly defaultShouldLeave: boolean,
     private readonly defaultTimingDebug: boolean,
-    runtimePaths: Pick<RuntimePaths, "databaseFile" | "legacyDatabaseFile"> | null = null,
+    runtimePaths: { databaseFile: RuntimePaths["databaseFile"]; legacyDatabaseFile?: string | null; ffmpegPath?: string } | null = null,
     private readonly transportFactory: VoiceTransportFactory = (member, callbacks) =>
       new DaveVoiceTransport(member, callbacks),
   ) {
     this.songHistory = runtimePaths ? new SongHistoryRepository(runtimePaths) : null;
+    this.ffmpegPath = runtimePaths?.ffmpegPath || "ffmpeg";
   }
 
   getState(guildId: string): MusicState {
@@ -479,6 +481,13 @@ DAVE
         if (!current || current.id !== resolved.id) {
           return;
         }
+        if (!resolved.streamUrl) {
+          state.queue[0] = {
+            ...current,
+            resolverNote: resolved.resolverNote ?? current.resolverNote,
+          };
+          return;
+        }
         state.queue[0] = {
           ...resolved,
           prefetchedAt: Date.now(),
@@ -513,30 +522,20 @@ DAVE
 
     this.stopSessionPlayback(session);
 
-    const ffmpeg = spawn("ffmpeg", [
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "5",
-      "-i", streamUrl,
-      "-thread_queue_size", "4096",
-      "-analyzeduration", "0",
-      "-loglevel", "warning",
-      "-vn",
-      "-ar", "48000",
-      "-ac", "2",
-      "-c:a", "libopus",
-      "-b:a", "128k",
-      "-vbr", "on",
-      "-frame_duration", "20",
-      "-application", "audio",
-      "-f", "opus",
-      "pipe:1",
-    ], {
+    const ffmpeg = spawn(this.ffmpegPath, this.buildFfmpegArgs(state.current), {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
+    const stderrLines: string[] = [];
     ffmpeg.stderr.on("data", () => {
       // Keep stderr drained so ffmpeg does not block the process.
+    });
+    ffmpeg.stderr.on("data", (chunk: Buffer) => {
+      const lines = chunk.toString("utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      stderrLines.push(...lines);
+      while (stderrLines.length > 8) {
+        stderrLines.shift();
+      }
     });
     ffmpeg.on("error", () => {
       if (session.ffmpeg === ffmpeg) {
@@ -549,7 +548,8 @@ DAVE
         session.ffmpeg = null;
       }
       if (wasActive && code && code !== 0) {
-        void this.handlePlaybackFailure(guildId, `ffmpeg exited with code ${code}`);
+        const stderrSummary = stderrLines.length > 0 ? ` | ffmpeg: ${stderrLines.join(" | ")}` : "";
+        void this.handlePlaybackFailure(guildId, `ffmpeg exited with code ${code}${stderrSummary}`);
       }
     });
 
@@ -567,6 +567,50 @@ DAVE
     session.transport.play(encoder);
     state.playbackStatus = "playing";
     this.recordDiagnostic(guildId, `Started DAVE playback for ${state.current.title}.`);
+  }
+
+  private buildFfmpegArgs(track: QueueItem): string[] {
+    const inputArgs = [
+      "-nostdin",
+      "-loglevel", "warning",
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "5",
+      "-thread_queue_size", "4096",
+      "-analyzeduration", "0",
+      "-probesize", "32k",
+      "-fflags", "+nobuffer",
+    ];
+
+    const headers = track.streamHeaders ?? {};
+    const userAgent = headers["User-Agent"] ?? headers["user-agent"];
+    if (userAgent) {
+      inputArgs.push("-user_agent", userAgent);
+    }
+
+    const headerLines = Object.entries(headers)
+      .filter(([name]) => name.toLowerCase() !== "user-agent")
+      .map(([name, value]) => `${name}: ${value}`)
+      .join("\r\n");
+    if (headerLines) {
+      inputArgs.push("-headers", `${headerLines}\r\n`);
+    }
+
+    inputArgs.push("-i", track.streamUrl ?? track.url);
+
+    return [
+      ...inputArgs,
+      "-vn",
+      "-ar", "48000",
+      "-ac", "2",
+      "-c:a", "libopus",
+      "-b:a", "128k",
+      "-vbr", "on",
+      "-frame_duration", "20",
+      "-application", "audio",
+      "-f", "opus",
+      "pipe:1",
+    ];
   }
 
   private scheduleIdleDisconnect(guildId: string): void {

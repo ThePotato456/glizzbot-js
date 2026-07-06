@@ -1,0 +1,13 @@
+node_modules
+dist
+logs
+temp
+downloads
+recordings
+.git
+.agents
+.codex
+config/config.json
+config/database.db
+discord.log
+*.log

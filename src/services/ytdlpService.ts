@@ -11,6 +11,7 @@ interface YtDlpMetadata {
   extractor?: string;
   extractor_key?: string;
   ie_key?: string;
+  http_headers?: Record<string, string>;
   entries?: Array<YtDlpMetadata | null>;
 }
 
@@ -20,6 +21,7 @@ export interface ResolvedMediaResult {
   sourceType: QueueSourceType;
   durationSeconds?: number;
   streamUrl: string;
+  streamHeaders?: Record<string, string>;
   webpageUrl?: string;
   extractor?: string;
   requestedQuery?: string;
@@ -43,6 +45,7 @@ export class YtDlpService {
   constructor(
     private readonly paths: RuntimePaths,
     private readonly runner: YtDlpRunner | null = null,
+    private readonly executablePath = "yt-dlp",
   ) {}
 
   async resolve(input: string, sourceType: QueueSourceType): Promise<ResolvedMediaResult> {
@@ -59,6 +62,7 @@ export class YtDlpService {
       sourceType,
       durationSeconds: entry.duration,
       streamUrl: entry.url,
+      streamHeaders: entry.http_headers,
       webpageUrl: entry.webpage_url ?? entry.original_url ?? input,
       extractor: entry.extractor,
       requestedQuery: sourceType === "search" ? input : undefined,
@@ -83,6 +87,8 @@ export class YtDlpService {
     const stdout = await this.runYtDlp([
       "--dump-single-json",
       "--no-playlist",
+      "--no-warnings",
+      "--skip-download",
       "-f", "bestaudio/best",
       input,
     ]);
@@ -93,6 +99,8 @@ export class YtDlpService {
     const stdout = await this.runYtDlp([
       "--dump-single-json",
       "--flat-playlist",
+      "--no-warnings",
+      "--skip-download",
       input,
     ]);
     return JSON.parse(stdout) as YtDlpMetadata;
@@ -141,7 +149,7 @@ export class YtDlpService {
       return this.runner(args);
     }
     return new Promise((resolve, reject) => {
-      const child = spawn("yt-dlp", args, {
+      const child = spawn(this.executablePath, args, {
         cwd: this.paths.root,
         stdio: ["ignore", "pipe", "pipe"],
       });

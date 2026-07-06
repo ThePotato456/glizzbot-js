@@ -15,6 +15,11 @@ const DEFAULT_CONFIG: AppConfig = {
   debug: true,
   prefix: "!",
   enabledCogs: ["manager", "music", "utility", "events", "record", "chat", "ytdlp", "webPanel"],
+  runtime: {
+    ffmpegPath: "ffmpeg",
+    ytDlpPath: "yt-dlp",
+    legacyDatabaseImportPath: null,
+  },
   discord: {
     token: "",
     ownerId: "",
@@ -61,6 +66,27 @@ function deepMerge<T>(base: T, override: unknown): T {
   return result as T;
 }
 
+function normalizeConfiguredPath(value: string | null | undefined, root: string): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (path.isAbsolute(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed.includes("/") || trimmed.includes("\\") || trimmed.startsWith(".")) {
+    return path.resolve(root, trimmed);
+  }
+
+  return trimmed;
+}
+
 export class ConfigStore {
   constructor(private readonly paths: RuntimePaths) {}
 
@@ -75,6 +101,12 @@ export class ConfigStore {
     const raw = JSON.parse(fs.readFileSync(this.paths.configFile, "utf8"));
     const merged = deepMerge(DEFAULT_CONFIG, raw);
 
+    merged.runtime.ffmpegPath = normalizeConfiguredPath(process.env.FFMPEG_PATH || merged.runtime.ffmpegPath, this.paths.root) ?? "ffmpeg";
+    merged.runtime.ytDlpPath = normalizeConfiguredPath(process.env.YTDLP_PATH || merged.runtime.ytDlpPath, this.paths.root) ?? "yt-dlp";
+    merged.runtime.legacyDatabaseImportPath = normalizeConfiguredPath(
+      process.env.LEGACY_DATABASE_IMPORT_PATH || merged.runtime.legacyDatabaseImportPath,
+      this.paths.root,
+    );
     merged.discord.token = process.env.DISCORD_TOKEN || merged.discord.token;
     merged.discord.ownerId = process.env.BOT_OWNER_ID || merged.discord.ownerId;
     merged.spotify.clientId = process.env.SPOTIFY_CLIENT_ID || merged.spotify.clientId;

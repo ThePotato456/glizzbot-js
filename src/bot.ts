@@ -42,14 +42,15 @@ export class GlizzBot extends Client {
 
     this.configStore = new ConfigStore(paths);
     this.logger = new AppLogger(paths, config.debug);
-    this.musicResolver = new MusicResolverService(paths);
+    this.musicResolver = new MusicResolverService(paths, null, config.runtime.ytDlpPath);
     this.music = new MusicService(
       config.music.idleDisconnectMs,
       config.music.shouldLeaveWhenIdle,
       config.music.timingDebugDefault,
       {
         databaseFile: paths.databaseFile,
-        legacyDatabaseFile: paths.legacyDatabaseFile,
+        legacyDatabaseFile: config.runtime.legacyDatabaseImportPath,
+        ffmpegPath: config.runtime.ffmpegPath,
       },
     );
     this.logger.debug(`Voice dependency report:\n${this.music.getDependencyReport()}`);
