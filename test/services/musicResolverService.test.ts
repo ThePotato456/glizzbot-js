@@ -161,3 +161,64 @@ test("resolveInput reports playlist expansion failures clearly", async () => {
   assert.equal(result.items.length, 0);
   assert.match(result.summary, /Failed to expand playlist with yt-dlp/i);
 });
+
+test("resolveInput reuses a cached yt-dlp result for repeated requests", async () => {
+  const paths = createTestRuntimePaths();
+  let calls = 0;
+  const diagnostics: string[] = [];
+  const resolver = new MusicResolverService(paths, async () => {
+    calls += 1;
+    return JSON.stringify({
+      title: "Cached Result",
+      duration: 123,
+      url: "https://media.example/cached",
+      webpage_url: "https://example.com/watch?v=cached",
+      extractor: "youtube",
+    });
+  }, "yt-dlp", (message) => diagnostics.push(message));
+
+  const first = await resolver.resolveInput("repeat me", "user-1");
+  const second = await resolver.resolveInput("repeat me", "user-1");
+
+  assert.equal(calls, 1);
+  assert.equal(first.items[0]?.streamUrl, "https://media.example/cached");
+  assert.equal(second.items[0]?.streamUrl, "https://media.example/cached");
+  assert.ok(diagnostics.some((message) => message.includes("media cache hit")));
+});
+
+test("resolveQueueItem shares an in-flight yt-dlp request across concurrent callers", async () => {
+  const paths = createTestRuntimePaths();
+  let calls = 0;
+  const diagnostics: string[] = [];
+  const resolver = new MusicResolverService(paths, async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return JSON.stringify({
+      title: "Concurrent Result",
+      duration: 222,
+      url: "https://media.example/concurrent",
+      webpage_url: "https://example.com/watch?v=concurrent",
+      extractor: "youtube",
+    });
+  }, "yt-dlp", (message) => diagnostics.push(message));
+
+  const queueItem = {
+    id: "q1",
+    title: "concurrent",
+    url: "same input",
+    requestedBy: "user-1",
+    isResolved: false,
+    sourceType: "search" as const,
+    addedAt: Date.now(),
+  };
+
+  const [first, second] = await Promise.all([
+    resolver.resolveQueueItem(queueItem),
+    resolver.resolveQueueItem(queueItem),
+  ]);
+
+  assert.equal(calls, 1);
+  assert.equal(first.streamUrl, "https://media.example/concurrent");
+  assert.equal(second.streamUrl, "https://media.example/concurrent");
+  assert.ok(diagnostics.some((message) => message.includes("media in-flight reuse")));
+});

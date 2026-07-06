@@ -79,6 +79,7 @@ interface VoiceSessionDescriptionPayload {
 
 interface PlaybackSession {
   readonly source: Readable;
+  readonly playbackId: string | null;
   readonly queue: Buffer[];
   ended: boolean;
   paused: boolean;
@@ -90,6 +91,7 @@ interface PlaybackSession {
   nextDispatchAt: number;
   daveWaitLogged: boolean;
   underrunLogged: boolean;
+  tickerTerminationExpected: boolean;
   readonly onData: (chunk: unknown) => void;
   readonly onEnd: () => void;
   readonly onError: (error: Error) => void;
@@ -309,7 +311,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.setConnectionState("disconnected");
   }
 
-  play(stream: Readable): void {
+  play(stream: Readable, playbackId: string | null = null): void {
     this.stop();
 
     const onData = (chunk: unknown) => {
@@ -331,11 +333,12 @@ export class DaveVoiceTransport implements VoiceTransport {
 
     const onError = (error: Error) => {
       this.log(`Playback stream error: ${error.message}`);
-      this.callbacks.onPlaybackError?.(error);
+      this.callbacks.onPlaybackError?.(error, playbackId);
     };
 
     this.playback = {
       source: stream,
+      playbackId,
       queue: [],
       ended: false,
       paused: false,
@@ -347,6 +350,7 @@ export class DaveVoiceTransport implements VoiceTransport {
       nextDispatchAt: performance.now() + RTP_FRAME_DURATION_MS,
       daveWaitLogged: false,
       underrunLogged: false,
+      tickerTerminationExpected: false,
       onData,
       onEnd,
       onError,
@@ -514,7 +518,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.ws.on("error", (error) => {
       const err = error instanceof Error ? error : new Error(String(error));
       this.log(`Voice WebSocket error: ${err.message}`);
-      this.callbacks.onPlaybackError?.(err);
+      this.callbacks.onPlaybackError?.(err, null);
       this.rejectConnect(err);
     });
     this.ws.on("close", (code, reasonBuffer) => {
@@ -599,7 +603,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     });
     this.udp.on("error", (error) => {
       this.log(`Voice UDP error: ${error.message}`);
-      this.callbacks.onPlaybackError?.(error);
+      this.callbacks.onPlaybackError?.(error, null);
     });
     this.udp.on("close", () => {
       this.log("Voice UDP socket closed.");
@@ -897,7 +901,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     });
 
     worker.on("exit", (code) => {
-      if (code !== 0) {
+      if (code !== 0 && !this.playback?.tickerTerminationExpected) {
         this.log(`Playback ticker worker exited with code ${code}.`);
       }
       if (!this.playback || this.playback.ticker !== worker) {
@@ -1067,7 +1071,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     const activePlayback = this.playback;
     this.stop();
     if (activePlayback) {
-      this.callbacks.onPlaybackFinished?.();
+      this.callbacks.onPlaybackFinished?.(activePlayback.playbackId);
     }
   }
 
@@ -1214,6 +1218,7 @@ export class DaveVoiceTransport implements VoiceTransport {
 
   private clearPlaybackTimer(playback: PlaybackSession): void {
     if (playback.ticker) {
+      playback.tickerTerminationExpected = true;
       playback.ticker.postMessage({ type: "stop" });
       void playback.ticker.terminate().catch(() => {});
       playback.ticker = null;

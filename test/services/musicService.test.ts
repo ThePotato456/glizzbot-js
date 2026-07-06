@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { VoiceTransportCallbacks } from "../../src/services/voice/voiceTransport.js";
 import { PermissionsBitField } from "discord.js";
 import { MusicService } from "../../src/services/musicService.js";
 import type { QueueItem } from "../../src/types.js";
@@ -36,7 +37,7 @@ test("advancePlayback promotes next queue item into current track", async () => 
   assert.equal(state.playbackStatus, "placeholder");
 });
 
-test("stop clears current track and pending queue", () => {
+test("stop clears current track and pending queue", async () => {
   const service = new MusicService(1000, true, false);
   service.enqueue("guild-1", createQueueItem({ title: "One" }));
   service.enqueue("guild-1", createQueueItem({ title: "Two" }));
@@ -48,6 +49,7 @@ test("stop clears current track and pending queue", () => {
   };
 
   service.stop("guild-1", "manual-stop");
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(state.current, null);
   assert.equal(state.queue.length, 0);
@@ -283,6 +285,7 @@ test("stop schedules idle disconnect when the guild should leave and voice is co
   });
 
   service.stop("guild-1", "manual-stop");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(state.connectionStatus, "idle-disconnect-pending");
 
   await new Promise((resolve) => setTimeout(resolve, 40));
@@ -449,4 +452,119 @@ test("ensureVoiceConnection fails fast when the bot lacks view-channel permissio
     } as never),
     /do not have permission to view/i,
   );
+});
+
+test("stale playback-finished callbacks do not clear the replacement track", async () => {
+  let callbacks: VoiceTransportCallbacks | null = null;
+  const transport = {
+    guildId: "guild-1",
+    channelId: "voice-1",
+    connect: async () => undefined,
+    disconnect: () => undefined,
+    play: (_stream: unknown, _playbackId?: string | null) => undefined,
+    pause: () => false,
+    resume: () => false,
+    stop: () => undefined,
+    isConnected: () => true,
+    getDebugState: () => "connected",
+  };
+
+  const service = new MusicService(
+    1000,
+    true,
+    false,
+    null,
+    (_member, receivedCallbacks) => {
+      callbacks = receivedCallbacks;
+      return transport as never;
+    },
+  );
+
+  await service.ensureVoiceConnection({
+    guild: {
+      id: "guild-1",
+      members: {
+        me: { id: "bot-1" },
+      },
+    },
+    voice: {
+      channel: {
+        id: "voice-1",
+        type: 2,
+        joinable: true,
+        speakable: true,
+        full: false,
+        name: "Voice",
+        permissionsFor: () => ({
+          has: () => true,
+        }),
+      },
+    },
+    client: {
+      user: { id: "bot-1" },
+    },
+  } as never);
+
+  service.getState("guild-1").textChannelId = "text-1";
+  service.enqueue("guild-1", createQueueItem({ title: "First" }));
+  service.enqueue("guild-1", createQueueItem({ title: "Second" }));
+
+  const first = await service.advancePlayback("guild-1", {
+    resolveQueueItem: async (item) => ({
+      ...item,
+      isResolved: true,
+      streamUrl: `https://media.example/${item.title.toLowerCase()}`,
+    }),
+  } as never);
+  assert.ok(first);
+
+  const second = await service.skip("guild-1", "manual-skip", {
+    resolveQueueItem: async (item) => ({
+      ...item,
+      isResolved: true,
+      streamUrl: `https://media.example/${item.title.toLowerCase()}`,
+    }),
+  } as never);
+  assert.ok(second);
+  assert.equal(service.getState("guild-1").current?.title, "Second");
+
+  callbacks?.onPlaybackFinished?.(first?.id ?? null);
+
+  const state = service.getState("guild-1");
+  assert.equal(state.current?.title, "Second");
+  assert.equal(state.queue.length, 0);
+  assert.equal(state.playbackStatus, "playing");
+});
+
+test("automatic playback failure notifies the track-finished handler with the replacement track", async () => {
+  const service = new MusicService(1000, true, false);
+  let announcedGuildId: string | null = null;
+  let announcedTrackTitle: string | null = null;
+
+  service.setTrackFinishedHandler(async (guildId, nextTrack) => {
+    announcedGuildId = guildId;
+    announcedTrackTitle = nextTrack?.title ?? null;
+  });
+
+  const state = service.getState("guild-1");
+  state.current = {
+    id: "current",
+    addedAt: Date.now(),
+    ...createQueueItem({ title: "Broken Track", isResolved: true, streamUrl: "https://media.example/broken" }),
+  };
+  state.playbackStatus = "playing";
+  service.enqueue("guild-1", createQueueItem({
+    title: "Replacement Track",
+    isResolved: true,
+    streamUrl: "https://media.example/replacement",
+  }));
+
+  await (service as any).handleAutomaticPlaybackFailure(
+    "guild-1",
+    "ffmpeg exited with code 1",
+  );
+
+  assert.equal(announcedGuildId, "guild-1");
+  assert.equal(announcedTrackTitle, "Replacement Track");
+  assert.equal(service.getState("guild-1").current?.title, "Replacement Track");
 });

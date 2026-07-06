@@ -42,7 +42,12 @@ export class GlizzBot extends Client {
 
     this.configStore = new ConfigStore(paths);
     this.logger = new AppLogger(paths, config.debug);
-    this.musicResolver = new MusicResolverService(paths, null, config.runtime.ytDlpPath);
+    this.musicResolver = new MusicResolverService(
+      paths,
+      null,
+      config.runtime.ytDlpPath,
+      (message) => this.logger.debug(message),
+    );
     this.music = new MusicService(
       config.music.idleDisconnectMs,
       config.music.shouldLeaveWhenIdle,
@@ -53,10 +58,13 @@ export class GlizzBot extends Client {
         ffmpegPath: config.runtime.ffmpegPath,
       },
     );
+    this.music.attachResolver(this.musicResolver);
+    this.music.attachDiagnosticMirror((guildId, line) => {
+      this.logger.debug(`[music:${guildId}] ${line}`);
+    });
     this.logger.debug(`Voice dependency report:\n${this.music.getDependencyReport()}`);
-    this.music.setTrackFinishedHandler(async (guildId) => {
-      const started = await this.music.advancePlayback(guildId, this.musicResolver);
-      await this.announceNowPlaying(guildId, started);
+    this.music.setTrackFinishedHandler(async (guildId, nextTrack) => {
+      await this.announceNowPlaying(guildId, nextTrack);
     });
   }
 

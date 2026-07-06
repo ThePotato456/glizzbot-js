@@ -1,6 +1,6 @@
 import type { QueueItem, QueueSourceType } from "../types.js";
 import type { RuntimePaths } from "../types.js";
-import { YtDlpService, type YtDlpRunner } from "./ytdlpService.js";
+import { YtDlpService, type YtDlpDiagnosticLogger, type YtDlpRunner } from "./ytdlpService.js";
 
 export interface ResolvedQueueRequest {
   items: Array<Omit<QueueItem, "id" | "addedAt">>;
@@ -69,8 +69,9 @@ export class MusicResolverService {
     private readonly paths: RuntimePaths,
     runner: YtDlpRunner | null = null,
     executablePath = "yt-dlp",
+    onDiagnostic: YtDlpDiagnosticLogger | null = null,
   ) {
-    this.ytdlp = new YtDlpService(paths, runner, executablePath);
+    this.ytdlp = new YtDlpService(paths, runner, executablePath, onDiagnostic);
   }
 
   async resolveInput(query: string, requestedBy: string): Promise<ResolvedQueueRequest> {

@@ -8,6 +8,8 @@ export function createTestRuntimePaths(root = path.resolve("test-tmp")): Runtime
     configFile: path.join(root, "config", "config.json"),
     databaseFile: path.join(root, "config", "database.db"),
     legacyDatabaseFile: path.join(root, "legacy", "database.db"),
+    logsDir: path.join(root, "logs"),
+    sessionLogFile: path.join(root, "logs", "test-session.txt"),
     downloadsDir: path.join(root, "downloads"),
     tempDir: path.join(root, "temp"),
     ytdlpTempDir: path.join(root, "temp", "ytdlp"),

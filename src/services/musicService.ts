@@ -18,15 +18,19 @@ interface GuildVoiceSession {
   idleTimer: NodeJS.Timeout | null;
   ffmpeg: ChildProcessByStdio<null, Readable, Readable> | null;
   encoder: Readable | null;
+  playbackId: string | null;
 }
 
 export class MusicService {
   private readonly states = new Map<string, MusicState>();
   private readonly sessions = new Map<string, GuildVoiceSession>();
   private readonly diagnostics = new Map<string, string[]>();
-  private onTrackFinished: ((guildId: string) => Promise<void>) | null = null;
+  private readonly operationChains = new Map<string, Promise<unknown>>();
+  private onTrackFinished: ((guildId: string, nextTrack: QueueItem | null) => Promise<void>) | null = null;
   private readonly songHistory: SongHistoryRepository | null;
   private readonly ffmpegPath: string;
+  private resolver: MusicResolverService | null = null;
+  private diagnosticMirror: ((guildId: string, message: string) => void) | null = null;
 
   constructor(
     private readonly idleDisconnectMs: number,
@@ -63,8 +67,16 @@ export class MusicService {
     return state;
   }
 
-  setTrackFinishedHandler(handler: (guildId: string) => Promise<void>): void {
+  setTrackFinishedHandler(handler: (guildId: string, nextTrack: QueueItem | null) => Promise<void>): void {
     this.onTrackFinished = handler;
+  }
+
+  attachResolver(resolver: MusicResolverService): void {
+    this.resolver = resolver;
+  }
+
+  attachDiagnosticMirror(mirror: (guildId: string, message: string) => void): void {
+    this.diagnosticMirror = mirror;
   }
 
   enqueue(guildId: string, item: Omit<QueueItem, "id" | "addedAt">): QueueItem {
@@ -84,19 +96,21 @@ export class MusicService {
     item: Omit<QueueItem, "id" | "addedAt">,
     resolver?: MusicResolverService,
   ): Promise<QueueItem | null> {
-    const state = this.getState(guildId);
-    if (state.current) {
-      state.queue.unshift(this.materializeQueueItem(item));
-      return this.skip(guildId, "immediate-play", resolver);
-    }
+    return this.runGuildOperation(guildId, async () => {
+      const state = this.getState(guildId);
+      if (state.current) {
+        state.queue.unshift(this.materializeQueueItem(item));
+        return this.skipInternal(guildId, "immediate-play", this.getResolver(resolver));
+      }
 
-    state.current = this.materializeQueueItem(item);
-    state.startedAt = Date.now();
-    state.isPaused = false;
-    state.playbackStatus = "placeholder";
-    this.cancelIdleDisconnect(guildId);
-    this.startCurrentTrack(guildId);
-    return state.current;
+      state.current = this.materializeQueueItem(item);
+      state.startedAt = Date.now();
+      state.isPaused = false;
+      state.playbackStatus = "placeholder";
+      this.cancelIdleDisconnect(guildId);
+      this.startCurrentTrack(guildId);
+      return state.current;
+    });
   }
 
   async ensureVoiceConnection(member: GuildMember, textChannelId?: string): Promise<void> {
@@ -160,6 +174,8 @@ export class MusicService {
       this.clearSession(guildId, true);
     }
 
+    let session: GuildVoiceSession | null = null;
+
     const transport = this.transportFactory(member, {
       onDiagnostic: (message) => {
         this.recordDiagnostic(guildId, message);
@@ -186,33 +202,30 @@ export class MusicService {
         currentState.playbackStatus = status;
         currentState.isPaused = status === "paused";
       },
-      onPlaybackFinished: () => {
-        const currentState = this.getState(guildId);
-        const hadTrack = Boolean(currentState.current);
-        if (!hadTrack || currentState.playbackStatus === "placeholder") {
-          currentState.playbackStatus = currentState.current ? "placeholder" : "idle";
+      onPlaybackFinished: (playbackId) => {
+        if (!session || !playbackId || session.playbackId !== playbackId) {
           return;
         }
-        currentState.current = null;
-        currentState.startedAt = null;
-        currentState.isPaused = false;
-        currentState.playbackStatus = "idle";
-        if (this.onTrackFinished) {
-          void this.onTrackFinished(guildId);
-        }
+        void this.handleTransportPlaybackFinished(guildId, playbackId);
       },
-      onPlaybackError: (error) => {
-        void this.handlePlaybackFailure(guildId, error.message);
+      onPlaybackError: (error, playbackId) => {
+        if (!session || !playbackId || session.playbackId !== playbackId) {
+          return;
+        }
+        void this.handleTransportPlaybackError(guildId, playbackId, error.message);
       },
       shouldLogTimingDebug: () => this.getState(guildId).timingDebug,
     });
 
-    this.sessions.set(guildId, {
+    session = {
       transport,
       idleTimer: null,
       ffmpeg: null,
       encoder: null,
-    });
+      playbackId: null,
+    };
+
+    this.sessions.set(guildId, session);
 
     try {
       await transport.connect();
@@ -268,48 +281,13 @@ export class MusicService {
   }
 
   async advancePlayback(guildId: string, resolver?: MusicResolverService): Promise<QueueItem | null> {
-    const state = this.getState(guildId);
-    let next: QueueItem | null = null;
-    while (state.queue.length > 0 && !next) {
-      const candidate = state.queue.shift() ?? null;
-      if (!candidate) {
-        break;
-      }
-      const resolved = resolver ? await resolver.resolveQueueItem(candidate) : candidate;
-      if (!resolved.streamUrl) {
-        this.mark(guildId, `Skipped unplayable queue item: ${resolved.title}`);
-        continue;
-      }
-      next = resolved;
-    }
-    state.current = next;
-    state.startedAt = next ? Date.now() : null;
-    state.isPaused = false;
-    state.playbackStatus = next ? "placeholder" : "idle";
-    if (resolver) {
-      this.prefetchNext(guildId, resolver);
-    }
-    if (!next) {
-      this.scheduleIdleDisconnect(guildId);
-      return null;
-    }
-    this.cancelIdleDisconnect(guildId);
-    this.startCurrentTrack(guildId);
-    return next;
+    return this.runGuildOperation(guildId, async () =>
+      this.advancePlaybackInternal(guildId, this.getResolver(resolver)));
   }
 
   async skip(guildId: string, reason: string, resolver?: MusicResolverService): Promise<QueueItem | null> {
-    const state = this.getState(guildId);
-    state.lastStopReason = reason;
-    state.current = null;
-    state.startedAt = null;
-    state.isPaused = false;
-    state.playbackStatus = "idle";
-    const session = this.sessions.get(guildId);
-    if (session) {
-      this.stopSessionPlayback(session);
-    }
-    return this.advancePlayback(guildId, resolver);
+    return this.runGuildOperation(guildId, async () =>
+      this.skipInternal(guildId, reason, this.getResolver(resolver)));
   }
 
   pause(guildId: string): boolean {
@@ -343,33 +321,25 @@ export class MusicService {
     reason: string,
     resolver?: MusicResolverService,
   ): Promise<QueueItem | null> {
-    const state = this.getState(guildId);
-    const session = this.sessions.get(guildId);
-    if (session) {
-      this.stopSessionPlayback(session);
-    }
-    this.mark(guildId, `Playback failure: ${reason}`);
-    state.current = null;
-    state.startedAt = null;
-    state.isPaused = false;
-    state.playbackStatus = "idle";
-    state.lastStopReason = "playback-failed";
-    return this.advancePlayback(guildId, resolver);
+    return this.runGuildOperation(guildId, async () =>
+      this.handlePlaybackFailureInternal(guildId, reason, this.getResolver(resolver)));
   }
 
   stop(guildId: string, reason: string): void {
-    const state = this.getState(guildId);
-    state.lastStopReason = reason;
-    state.current = null;
-    state.queue = [];
-    state.startedAt = null;
-    state.isPaused = false;
-    state.playbackStatus = "idle";
-    const session = this.sessions.get(guildId);
-    if (session) {
-      this.stopSessionPlayback(session);
-    }
-    this.scheduleIdleDisconnect(guildId);
+    void this.runGuildOperation(guildId, async () => {
+      const state = this.getState(guildId);
+      state.lastStopReason = reason;
+      state.current = null;
+      state.queue = [];
+      state.startedAt = null;
+      state.isPaused = false;
+      state.playbackStatus = "idle";
+      const session = this.sessions.get(guildId);
+      if (session) {
+        this.stopSessionPlayback(session);
+      }
+      this.scheduleIdleDisconnect(guildId);
+    });
   }
 
   clear(guildId: string): number {
@@ -525,6 +495,8 @@ DAVE
     const ffmpeg = spawn(this.ffmpegPath, this.buildFfmpegArgs(state.current), {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const playbackId = state.current.id;
+    session.playbackId = playbackId;
 
     const stderrLines: string[] = [];
     ffmpeg.stderr.on("data", () => {
@@ -538,33 +510,33 @@ DAVE
       }
     });
     ffmpeg.on("error", () => {
-      if (session.ffmpeg === ffmpeg) {
-        void this.handlePlaybackFailure(guildId, "ffmpeg process error");
+      if (session.ffmpeg === ffmpeg && session.playbackId === playbackId) {
+        void this.handleAutomaticPlaybackFailure(guildId, "ffmpeg process error");
       }
     });
     ffmpeg.on("close", (code) => {
-      const wasActive = session.ffmpeg === ffmpeg;
+      const wasActive = session.ffmpeg === ffmpeg && session.playbackId === playbackId;
       if (wasActive) {
         session.ffmpeg = null;
       }
       if (wasActive && code && code !== 0) {
         const stderrSummary = stderrLines.length > 0 ? ` | ffmpeg: ${stderrLines.join(" | ")}` : "";
-        void this.handlePlaybackFailure(guildId, `ffmpeg exited with code ${code}${stderrSummary}`);
+        void this.handleAutomaticPlaybackFailure(guildId, `ffmpeg exited with code ${code}${stderrSummary}`);
       }
     });
 
     const encoder = new opus.OggDemuxer();
 
     encoder.on("error", () => {
-      if (session.encoder === encoder) {
-        void this.handlePlaybackFailure(guildId, "Opus demuxer error");
+      if (session.encoder === encoder && session.playbackId === playbackId) {
+        void this.handleAutomaticPlaybackFailure(guildId, "Opus demuxer error");
       }
     });
 
     ffmpeg.stdout.pipe(encoder);
     session.ffmpeg = ffmpeg;
     session.encoder = encoder;
-    session.transport.play(encoder);
+    session.transport.play(encoder, playbackId);
     state.playbackStatus = "playing";
     this.recordDiagnostic(guildId, `Started DAVE playback for ${state.current.title}.`);
   }
@@ -646,6 +618,7 @@ DAVE
   }
 
   private stopSessionPlayback(session: GuildVoiceSession): void {
+    session.playbackId = null;
     const legacyPlayer = Reflect.get(session as object, "player") as { stop?: (force?: boolean) => void } | undefined;
     if (session.ffmpeg && !session.ffmpeg.killed) {
       session.ffmpeg.kill();
@@ -683,10 +656,156 @@ DAVE
 
   private recordDiagnostic(guildId: string, message: string): void {
     const lines = this.diagnostics.get(guildId) ?? [];
-    lines.push(`[${new Date().toISOString()}] ${message}`);
+    const line = `[${new Date().toISOString()}] ${message}`;
+    lines.push(line);
     while (lines.length > 30) {
       lines.shift();
     }
     this.diagnostics.set(guildId, lines);
+    this.diagnosticMirror?.(guildId, line);
+  }
+
+  private getResolver(resolver?: MusicResolverService): MusicResolverService | undefined {
+    return resolver ?? this.resolver ?? undefined;
+  }
+
+  private async runGuildOperation<T>(guildId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.operationChains.get(guildId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    this.operationChains.set(guildId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.operationChains.get(guildId) === next) {
+        this.operationChains.delete(guildId);
+      }
+    }
+  }
+
+  private async advancePlaybackInternal(
+    guildId: string,
+    resolver?: MusicResolverService,
+  ): Promise<QueueItem | null> {
+    const state = this.getState(guildId);
+    let next: QueueItem | null = null;
+    while (state.queue.length > 0 && !next) {
+      const candidate = state.queue.shift() ?? null;
+      if (!candidate) {
+        break;
+      }
+      const resolved = resolver ? await resolver.resolveQueueItem(candidate) : candidate;
+      if (!resolved.streamUrl) {
+        this.mark(guildId, `Skipped unplayable queue item: ${resolved.title}`);
+        continue;
+      }
+      next = resolved;
+    }
+    state.current = next;
+    state.startedAt = next ? Date.now() : null;
+    state.isPaused = false;
+    state.playbackStatus = next ? "placeholder" : "idle";
+    if (resolver) {
+      this.prefetchNext(guildId, resolver);
+    }
+    if (!next) {
+      this.scheduleIdleDisconnect(guildId);
+      return null;
+    }
+    this.cancelIdleDisconnect(guildId);
+    this.startCurrentTrack(guildId);
+    return next;
+  }
+
+  private async skipInternal(
+    guildId: string,
+    reason: string,
+    resolver?: MusicResolverService,
+  ): Promise<QueueItem | null> {
+    const state = this.getState(guildId);
+    state.lastStopReason = reason;
+    state.current = null;
+    state.startedAt = null;
+    state.isPaused = false;
+    state.playbackStatus = "idle";
+    const session = this.sessions.get(guildId);
+    if (session) {
+      this.stopSessionPlayback(session);
+    }
+    return this.advancePlaybackInternal(guildId, resolver);
+  }
+
+  private async handlePlaybackFailureInternal(
+    guildId: string,
+    reason: string,
+    resolver?: MusicResolverService,
+  ): Promise<QueueItem | null> {
+    const state = this.getState(guildId);
+    const session = this.sessions.get(guildId);
+    if (session) {
+      this.stopSessionPlayback(session);
+    }
+    this.mark(guildId, `Playback failure: ${reason}`);
+    state.current = null;
+    state.startedAt = null;
+    state.isPaused = false;
+    state.playbackStatus = "idle";
+    state.lastStopReason = "playback-failed";
+    return this.advancePlaybackInternal(guildId, resolver);
+  }
+
+  private async handleTransportPlaybackFinished(guildId: string, playbackId: string): Promise<void> {
+    let nextTrack: QueueItem | null = null;
+    await this.runGuildOperation(guildId, async () => {
+      const session = this.sessions.get(guildId);
+      if (!session || session.playbackId !== playbackId) {
+        return;
+      }
+      session.playbackId = null;
+
+      const currentState = this.getState(guildId);
+      if (!currentState.current || currentState.playbackStatus === "placeholder") {
+        currentState.playbackStatus = currentState.current ? "placeholder" : "idle";
+        return;
+      }
+
+      currentState.current = null;
+      currentState.startedAt = null;
+      currentState.isPaused = false;
+      currentState.playbackStatus = "idle";
+      nextTrack = await this.advancePlaybackInternal(guildId, this.getResolver());
+    });
+
+    if (this.onTrackFinished) {
+      await this.onTrackFinished(guildId, nextTrack);
+    }
+  }
+
+  private async handleTransportPlaybackError(
+    guildId: string,
+    playbackId: string,
+    reason: string,
+  ): Promise<void> {
+    let nextTrack: QueueItem | null = null;
+    await this.runGuildOperation(guildId, async () => {
+      const session = this.sessions.get(guildId);
+      if (!session || session.playbackId !== playbackId) {
+        return;
+      }
+      nextTrack = await this.handlePlaybackFailureInternal(guildId, reason, this.getResolver());
+    });
+
+    if (this.onTrackFinished) {
+      await this.onTrackFinished(guildId, nextTrack);
+    }
+  }
+
+  private async handleAutomaticPlaybackFailure(
+    guildId: string,
+    reason: string,
+  ): Promise<void> {
+    const nextTrack = await this.handlePlaybackFailure(guildId, reason, this.getResolver());
+    if (this.onTrackFinished) {
+      await this.onTrackFinished(guildId, nextTrack);
+    }
   }
 }

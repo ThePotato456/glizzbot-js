@@ -148,6 +148,7 @@ export class ConfigStore {
   private ensureRuntimeDirectories(): void {
     for (const dir of [
       this.paths.configDir,
+      this.paths.logsDir,
       this.paths.downloadsDir,
       this.paths.tempDir,
       this.paths.ytdlpTempDir,

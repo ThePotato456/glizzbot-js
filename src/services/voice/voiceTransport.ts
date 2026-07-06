@@ -8,8 +8,8 @@ export interface VoiceTransportCallbacks {
   onDiagnostic?: (message: string) => void;
   onConnectionStateChange?: (state: VoiceConnectionState) => void;
   onPlaybackStateChange?: (state: VoicePlaybackState) => void;
-  onPlaybackFinished?: () => void;
-  onPlaybackError?: (error: Error) => void;
+  onPlaybackFinished?: (playbackId: string | null) => void;
+  onPlaybackError?: (error: Error, playbackId: string | null) => void;
   shouldLogTimingDebug?: () => boolean;
 }
 
@@ -18,7 +18,7 @@ export interface VoiceTransport {
   readonly guildId: string;
   connect(): Promise<void>;
   disconnect(): void;
-  play(stream: Readable): void;
+  play(stream: Readable, playbackId?: string | null): void;
   pause(): boolean;
   resume(): boolean;
   stop(): void;

@@ -5,7 +5,9 @@ import { LogBuffer } from "./services/logBuffer.js";
 export class AppLogger {
   readonly buffer = new LogBuffer();
 
-  constructor(private readonly paths: RuntimePaths, private readonly debugEnabled: boolean) {}
+  constructor(private readonly paths: RuntimePaths, private readonly debugEnabled: boolean) {
+    fs.mkdirSync(this.paths.logsDir, { recursive: true });
+  }
 
   info(message: string): void {
     this.write("info", message);
@@ -30,5 +32,6 @@ export class AppLogger {
     this.buffer.push(level, message);
     console.log(line);
     fs.appendFileSync(this.paths.discordLogFile, `${line}\n`);
+    fs.appendFileSync(this.paths.sessionLogFile, `${line}\n`);
   }
 }
