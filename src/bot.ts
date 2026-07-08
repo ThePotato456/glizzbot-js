@@ -100,6 +100,7 @@ export class GlizzBot extends Client {
 
   private registerEventHandlers(): void {
     this.once("clientReady", () => {
+      this.ensureGuildConfigsForConnectedGuilds();
       this.logger.info(`Logged in as ${this.user?.tag ?? "unknown user"}`);
     });
 
@@ -232,5 +233,17 @@ export class GlizzBot extends Client {
     return userFacingPrefixes.some((prefix) => error.message.startsWith(prefix))
       ? error.message
       : "That command failed. Check logs or the web panel for details.";
+  }
+
+  private ensureGuildConfigsForConnectedGuilds(): void {
+    const existingGuildIds = new Set(Object.keys(this.config.guilds));
+    const connectedGuildIds = this.guilds.cache.map((guild) => guild.id);
+    const nextConfig = this.configStore.ensureGuildEntries(this.config, connectedGuildIds);
+    Object.assign(this.config, nextConfig);
+
+    const addedCount = connectedGuildIds.filter((guildId) => !existingGuildIds.has(guildId)).length;
+    if (addedCount > 0) {
+      this.logger.info(`Initialized config entries for ${addedCount} connected guild(s) during startup.`);
+    }
   }
 }

@@ -145,6 +145,20 @@ export class ConfigStore {
     return next;
   }
 
+  ensureGuildEntries(config: AppConfig, guildIds: Iterable<string>): AppConfig {
+    const missingGuildIds = [...new Set([...guildIds].filter((guildId) => !config.guilds[guildId]))];
+    if (missingGuildIds.length === 0) {
+      return config;
+    }
+
+    const next = structuredClone(config);
+    for (const guildId of missingGuildIds) {
+      next.guilds[guildId] = {};
+    }
+    this.save(next);
+    return next;
+  }
+
   private ensureRuntimeDirectories(): void {
     for (const dir of [
       this.paths.configDir,
