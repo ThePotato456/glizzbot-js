@@ -123,6 +123,36 @@ export interface PlaybackDispatchPlan {
   resynchronized: boolean;
 }
 
+export interface VoiceTransportDiagnosticSnapshot {
+  event: string;
+  guildId: string;
+  channelId: string;
+  endpoint: string | null;
+  sessionId: string | null;
+  connectionState: VoiceConnectionState;
+  playbackState: VoicePlaybackState;
+  destroyed: boolean;
+  wsState: string;
+  udpReady: boolean;
+  udpRemote: string | null;
+  daveProtocolVersion: number;
+  daveReady: boolean;
+  davePrivacyCode: string | null;
+  missedHeartbeats: number;
+  lastHeartbeatAgeMs: number | null;
+  wsPingMs: number;
+  lastGatewaySequence: number;
+  playbackActive: boolean;
+  playbackId: string | null;
+  playbackBufferedFrames: number;
+  playbackEnded: boolean;
+  playbackPaused: boolean;
+  speaking: boolean;
+  ssrc: number;
+  encryptionMode: string | null;
+  extra?: string;
+}
+
 export function planPlaybackDispatch(now: number, scheduledAt: number): PlaybackDispatchPlan {
   const lateByMs = now - scheduledAt;
   if (lateByMs < -SCHEDULER_EARLY_TOLERANCE_MS) {
@@ -147,6 +177,37 @@ export function planPlaybackDispatch(now: number, scheduledAt: number): Playback
     nextDispatchAt: resynchronized ? now + RTP_FRAME_DURATION_MS : scheduledAt + RTP_FRAME_DURATION_MS,
     resynchronized,
   };
+}
+
+export function formatVoiceTransportDiagnosticSnapshot(snapshot: VoiceTransportDiagnosticSnapshot): string {
+  const fields = [
+    `guild=${snapshot.guildId}`,
+    `channel=${snapshot.channelId}`,
+    `endpoint=${snapshot.endpoint ?? "none"}`,
+    `session=${snapshot.sessionId ?? "none"}`,
+    `connection=${snapshot.connectionState}`,
+    `playback=${snapshot.playbackState}`,
+    `destroyed=${snapshot.destroyed}`,
+    `ws=${snapshot.wsState}`,
+    `udp=${snapshot.udpReady ? "ready" : "none"}`,
+    `udpRemote=${snapshot.udpRemote ?? "none"}`,
+    `dave=v${snapshot.daveProtocolVersion}${snapshot.daveReady ? ":ready" : ":pending"}:${snapshot.davePrivacyCode ?? "none"}`,
+    `heartbeat=missed:${snapshot.missedHeartbeats},lastAgeMs:${snapshot.lastHeartbeatAgeMs ?? "never"},pingMs:${snapshot.wsPingMs},seq:${snapshot.lastGatewaySequence}`,
+    `playbackActive=${snapshot.playbackActive}`,
+    `playbackId=${snapshot.playbackId ?? "none"}`,
+    `buffer=${snapshot.playbackBufferedFrames}`,
+    `ended=${snapshot.playbackEnded}`,
+    `paused=${snapshot.playbackPaused}`,
+    `speaking=${snapshot.speaking}`,
+    `ssrc=${snapshot.ssrc}`,
+    `encryption=${snapshot.encryptionMode ?? "none"}`,
+  ];
+
+  if (snapshot.extra) {
+    fields.push(`extra=${snapshot.extra}`);
+  }
+
+  return `Transport snapshot event=${snapshot.event} ${fields.join(" ")}`;
 }
 
 function randomNBit(bits: number): number {
@@ -276,6 +337,7 @@ export class DaveVoiceTransport implements VoiceTransport {
   }
 
   disconnect(): void {
+    this.logTransportSnapshot("disconnect-requested");
     this.destroyed = true;
     this.stop();
     this.setSpeaking(false);
@@ -431,6 +493,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     const methods: DiscordGatewayAdapterLibraryMethods = {
       destroy: () => {
         this.log("Gateway adapter destroy callback invoked.");
+        this.logTransportSnapshot("adapter-destroy-callback");
         this.disconnect();
       },
       onVoiceServerUpdate: (data) => {
@@ -463,6 +526,7 @@ export class DaveVoiceTransport implements VoiceTransport {
       },
       destroy: () => {
         this.log("Adapter destroy called by transport.");
+        this.logTransportSnapshot("adapter-destroy");
         adapter.destroy();
       },
     };
@@ -499,6 +563,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.ws = new WebSocket(address);
     this.ws.on("open", () => {
       this.log("Voice WebSocket opened.");
+      this.logTransportSnapshot("ws-open");
       this.sendJson(VoiceGatewayOpcode.Identify, {
         server_id: this.guildId,
         user_id: this.userId,
@@ -518,12 +583,14 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.ws.on("error", (error) => {
       const err = error instanceof Error ? error : new Error(String(error));
       this.log(`Voice WebSocket error: ${err.message}`);
+      this.logTransportSnapshot("ws-error", err.message);
       this.callbacks.onPlaybackError?.(err, null);
       this.rejectConnect(err);
     });
     this.ws.on("close", (code, reasonBuffer) => {
       const reason = reasonBuffer.toString("utf8");
       this.log(`Voice WebSocket close event code=${code} reason=${reason || "none"}.`);
+      this.logTransportSnapshot("ws-close", `code:${code},reason:${reason || "none"}`);
       if (!this.destroyed) {
         this.rejectConnect(new Error(`Voice WebSocket closed with code ${code}${reason ? ` (${reason})` : ""}.`));
         this.disconnect();
@@ -603,10 +670,12 @@ export class DaveVoiceTransport implements VoiceTransport {
     });
     this.udp.on("error", (error) => {
       this.log(`Voice UDP error: ${error.message}`);
+      this.logTransportSnapshot("udp-error", error.message);
       this.callbacks.onPlaybackError?.(error, null);
     });
     this.udp.on("close", () => {
       this.log("Voice UDP socket closed.");
+      this.logTransportSnapshot("udp-close");
       if (!this.destroyed) {
         this.disconnect();
       }
@@ -745,6 +814,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.heartbeatInterval = setInterval(() => {
       if (this.lastHeartbeatSentAt !== 0 && this.missedHeartbeats >= HEARTBEAT_MISSES_BEFORE_CLOSE) {
         this.log("Voice WebSocket heartbeat timed out.");
+        this.logTransportSnapshot("heartbeat-timeout");
         this.ws?.close();
         return;
       }
@@ -1214,6 +1284,64 @@ export class DaveVoiceTransport implements VoiceTransport {
 
   private log(message: string): void {
     this.callbacks.onDiagnostic?.(message);
+  }
+
+  private logTransportSnapshot(event: string, extra?: string): void {
+    this.log(formatVoiceTransportDiagnosticSnapshot(this.createDiagnosticSnapshot(event, extra)));
+  }
+
+  private createDiagnosticSnapshot(event: string, extra?: string): VoiceTransportDiagnosticSnapshot {
+    const now = Date.now();
+    const playback = this.playback;
+
+    return {
+      event,
+      guildId: this.guildId,
+      channelId: this.channelId,
+      endpoint: this.endpoint,
+      sessionId: this.sessionId,
+      connectionState: this.connectionState,
+      playbackState: this.playbackState,
+      destroyed: this.destroyed,
+      wsState: this.describeWebSocketState(),
+      udpReady: Boolean(this.udp),
+      udpRemote: this.udpRemoteIp && this.udpRemotePort ? `${this.udpRemoteIp}:${this.udpRemotePort}` : null,
+      daveProtocolVersion: this.daveSession.currentProtocolVersion,
+      daveReady: this.daveSession.ready,
+      davePrivacyCode: this.daveSession.currentVoicePrivacyCode || null,
+      missedHeartbeats: this.missedHeartbeats,
+      lastHeartbeatAgeMs: this.lastHeartbeatSentAt > 0 ? now - this.lastHeartbeatSentAt : null,
+      wsPingMs: this.wsPingMs,
+      lastGatewaySequence: this.lastGatewaySequence,
+      playbackActive: Boolean(playback),
+      playbackId: playback?.playbackId ?? null,
+      playbackBufferedFrames: playback?.queue.length ?? 0,
+      playbackEnded: playback?.ended ?? false,
+      playbackPaused: playback?.paused ?? false,
+      speaking: this.speaking,
+      ssrc: this.ssrc,
+      encryptionMode: this.encryptionMode,
+      extra,
+    };
+  }
+
+  private describeWebSocketState(): string {
+    if (!this.ws) {
+      return "none";
+    }
+
+    switch (this.ws.readyState) {
+      case WebSocket.CONNECTING:
+        return "connecting";
+      case WebSocket.OPEN:
+        return "open";
+      case WebSocket.CLOSING:
+        return "closing";
+      case WebSocket.CLOSED:
+        return "closed";
+      default:
+        return `unknown:${this.ws.readyState}`;
+    }
   }
 
   private clearPlaybackTimer(playback: PlaybackSession): void {
