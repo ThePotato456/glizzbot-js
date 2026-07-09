@@ -97,6 +97,7 @@ function createBotMock() {
     resume: 0,
     skip: 0,
     getRandomHistory: 0,
+    insertIndex: null as number | null,
   };
 
   const randomHistory: SongHistoryRow[] = [
@@ -155,7 +156,10 @@ function createBotMock() {
       clear: () => 0,
       shuffle: () => undefined,
       remove: () => null,
-      insert: () => ({ id: "inserted", addedAt: Date.now(), ...createQueueItem() }),
+      insert: (_guildId: string, index: number, item: Omit<QueueItem, "id" | "addedAt">) => {
+        calls.insertIndex = index;
+        return { id: "inserted", addedAt: Date.now(), ...item };
+      },
       mark: () => undefined,
     },
   };
@@ -182,14 +186,41 @@ test("play replies with usage when no query or url is provided", async () => {
 test("playrandom replies with usage when the amount is missing or invalid", async () => {
   const { bot } = createBotMock();
   const command = getCommand(createMusicCommands(bot), "playrandom");
-  const missing = createCommandContext({ args: [] });
   const invalid = createCommandContext({ args: ["abc"] });
 
-  await command.execute(missing.ctx);
   await command.execute(invalid.ctx);
 
-  assert.deepEqual(missing.replies, [{ content: "Usage: playrandom <number> [@user/user_id]" }]);
-  assert.deepEqual(invalid.replies, [{ content: "Usage: playrandom <number> [@user/user_id]" }]);
+  assert.deepEqual(invalid.replies, [{ content: "Usage: playrandom [number] [all|@user/user_id]" }]);
+});
+
+test("playrandom defaults to one song from the caller history", async () => {
+  const { bot, calls } = createBotMock();
+  const command = getCommand(createMusicCommands(bot), "playrandom");
+  const { ctx, replies } = createCommandContext({ args: [] });
+  bot.music.getRandomHistory = (amount: number, userId?: string) => {
+    calls.getRandomHistory += 1;
+    assert.equal(amount, 1);
+    assert.equal(userId, "user-1");
+    return [
+      {
+        song_title: "Default History Track",
+        song_url: "https://example.com/watch?v=default",
+        user_id: "user-1",
+        duration: "01:23",
+      },
+    ];
+  };
+  bot.music.advancePlayback = async () => {
+    calls.advancePlayback += 1;
+    return { id: "current", addedAt: Date.now(), ...createQueueItem({ title: "Default History Track" }) };
+  };
+
+  await command.execute(ctx);
+
+  assert.equal(calls.getRandomHistory, 1);
+  assert.equal(calls.enqueue, 1);
+  assert.equal(calls.advancePlayback, 1);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "**__Now Playing:__**\n\t\tDefault History Track");
 });
 
 test("playrandom queues songs from the caller history by default and starts playback", async () => {
@@ -230,6 +261,58 @@ test("playrandom queues songs from the caller history by default and starts play
   assert.equal(replies[0]?.embeds?.[0]?.data?.footer?.text, "Queued 1 more random track(s) from tester's history.");
 });
 
+test("playrandom can target global history with all", async () => {
+  const { bot, calls, state } = createBotMock();
+  state.current = { id: "active", addedAt: Date.now(), ...createQueueItem({ title: "Already Playing" }) };
+  const command = getCommand(createMusicCommands(bot), "playrandom");
+  const { ctx, replies } = createCommandContext({ args: ["all"] });
+  bot.music.getRandomHistory = (amount: number, userId?: string) => {
+    calls.getRandomHistory += 1;
+    assert.equal(amount, 1);
+    assert.equal(userId, undefined);
+    return [
+      {
+        song_title: "Global Track",
+        song_url: "https://example.com/watch?v=global",
+        user_id: "user-2",
+        duration: "02:22",
+      },
+    ];
+  };
+
+  await command.execute(ctx);
+
+  assert.equal(calls.getRandomHistory, 1);
+  assert.equal(calls.advancePlayback, 0);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "Queued 1 random song(s) from global history.");
+});
+
+test("playrandom treats a lone user id as the target with a default amount of one", async () => {
+  const { bot, calls, state } = createBotMock();
+  state.current = { id: "active", addedAt: Date.now(), ...createQueueItem({ title: "Already Playing" }) };
+  const command = getCommand(createMusicCommands(bot), "playrandom");
+  const { ctx, replies } = createCommandContext({ args: ["123456789012345678"] });
+  bot.music.getRandomHistory = (amount: number, userId?: string) => {
+    calls.getRandomHistory += 1;
+    assert.equal(amount, 1);
+    assert.equal(userId, "123456789012345678");
+    return [
+      {
+        song_title: "Target User Track",
+        song_url: "https://example.com/watch?v=target",
+        user_id: "123456789012345678",
+        duration: "02:22",
+      },
+    ];
+  };
+
+  await command.execute(ctx);
+
+  assert.equal(calls.getRandomHistory, 1);
+  assert.equal(calls.advancePlayback, 0);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "Queued 1 random song(s) from user 123456789012345678's history.");
+});
+
 test("playrandom can target a mentioned user and queues without advancing when something is already active", async () => {
   const { bot, calls, state } = createBotMock();
   state.current = { id: "active", addedAt: Date.now(), ...createQueueItem({ title: "Already Playing" }) };
@@ -265,6 +348,21 @@ test("playrandom can target a mentioned user and queues without advancing when s
   assert.equal(calls.getRandomHistory, 1);
   assert.equal(calls.advancePlayback, 0);
   assert.equal(replies[0]?.embeds?.[0]?.data?.description, "Queued 1 random song(s) from friend's history.");
+});
+
+test("insert places a resolved query at the top of the queue", async () => {
+  const { bot, calls } = createBotMock();
+  const command = getCommand(createMusicCommands(bot), "insert");
+  const { ctx, replies } = createCommandContext({
+    args: ["some", "song"],
+    rawArgs: "some song",
+  });
+
+  await command.execute(ctx);
+
+  assert.equal(calls.resolveInput, 1);
+  assert.equal(calls.insertIndex, 0);
+  assert.equal(replies[0]?.embeds?.[0]?.data?.description, "**__Inserted Next:__**\nResolved Track");
 });
 
 test("play connects, resolves, and starts playback when nothing is active", async () => {

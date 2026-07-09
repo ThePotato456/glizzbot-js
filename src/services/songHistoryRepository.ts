@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { QueueItem, RuntimePaths } from "../types.js";
 import { formatDuration } from "../utils/format.js";
@@ -77,6 +78,12 @@ export class SongHistoryRepository {
       return [];
     }
 
+    const sampleLimit = Math.min(Math.max(normalizedLimit * 8, normalizedLimit), 250);
+    const rows = this.getRandomSongCandidates(sampleLimit, userId);
+    return this.pickRandomDistinctSongs(rows, normalizedLimit);
+  }
+
+  private getRandomSongCandidates(limit: number, userId?: string): SongHistoryRow[] {
     if (userId && userId.trim()) {
       return this.database.prepare(`
         SELECT song_title, song_url, user_id, duration, datetime
@@ -84,7 +91,7 @@ export class SongHistoryRepository {
         WHERE user_id = ?
         ORDER BY RANDOM()
         LIMIT ?
-      `).all(userId.trim(), normalizedLimit) as unknown as SongHistoryRow[];
+      `).all(userId.trim(), limit) as unknown as SongHistoryRow[];
     }
 
     return this.database.prepare(`
@@ -92,11 +99,51 @@ export class SongHistoryRepository {
       FROM song_history
       ORDER BY RANDOM()
       LIMIT ?
-    `).all(normalizedLimit) as unknown as SongHistoryRow[];
+    `).all(limit) as unknown as SongHistoryRow[];
   }
 
   close(): void {
     this.database.close();
+  }
+
+  private pickRandomDistinctSongs(rows: SongHistoryRow[], limit: number): SongHistoryRow[] {
+    const shuffledRows = this.shuffleRows(rows);
+    const selected: SongHistoryRow[] = [];
+    const duplicateFallbacks: SongHistoryRow[] = [];
+    const seenSongKeys = new Set<string>();
+
+    for (const row of shuffledRows) {
+      const songKey = this.getSongKey(row);
+      if (seenSongKeys.has(songKey)) {
+        duplicateFallbacks.push(row);
+        continue;
+      }
+
+      selected.push(row);
+      seenSongKeys.add(songKey);
+      if (selected.length >= limit) {
+        return selected;
+      }
+    }
+
+    return selected.concat(duplicateFallbacks.slice(0, limit - selected.length));
+  }
+
+  private shuffleRows(rows: SongHistoryRow[]): SongHistoryRow[] {
+    const shuffledRows = [...rows];
+    for (let i = shuffledRows.length - 1; i > 0; i -= 1) {
+      const j = crypto.randomInt(i + 1);
+      [shuffledRows[i], shuffledRows[j]] = [shuffledRows[j], shuffledRows[i]];
+    }
+    return shuffledRows;
+  }
+
+  private getSongKey(row: SongHistoryRow): string {
+    const normalizedUrl = row.song_url.trim().toLowerCase();
+    if (normalizedUrl) {
+      return normalizedUrl;
+    }
+    return row.song_title.trim().toLowerCase();
   }
 
   private ensureDatabaseFile(): void {

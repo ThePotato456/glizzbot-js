@@ -6,8 +6,13 @@ import { buildTrackEmbed, createMusicEmbed } from "./musicEmbeds.js";
 const PLAYRANDOM_MAX = 10;
 
 interface PlayrandomTarget {
-  userId: string;
+  userId?: string;
   historyLabel: string;
+}
+
+interface PlayrandomRequest {
+  amount: number;
+  targetArg?: string;
 }
 
 function buildQueueEmbed(bot: GlizzBot, guildId: string): EmbedBuilder {
@@ -62,12 +67,46 @@ function describeUserName(
   return fallbackId ? `user ${fallbackId}` : "Unknown";
 }
 
-function parsePlayrandomTarget(ctx: Parameters<BotCommand["execute"]>[0]): PlayrandomTarget | null {
-  const rawTarget = ctx.args[1];
+function parsePlayrandomRequest(ctx: Parameters<BotCommand["execute"]>[0]): PlayrandomRequest | null {
+  if (ctx.args.length > 2) {
+    return null;
+  }
+
+  const [firstArg, secondArg] = ctx.args;
+  if (!firstArg) {
+    return { amount: 1 };
+  }
+
+  if (isDiscordUserId(firstArg) && !secondArg) {
+    return { amount: 1, targetArg: firstArg };
+  }
+
+  const parsedAmount = Number.parseInt(firstArg, 10);
+  if (!Number.isNaN(parsedAmount) && String(parsedAmount) === firstArg) {
+    return { amount: parsedAmount, targetArg: secondArg };
+  }
+
+  if (!secondArg) {
+    return { amount: 1, targetArg: firstArg };
+  }
+
+  return null;
+}
+
+function parsePlayrandomTarget(
+  ctx: Parameters<BotCommand["execute"]>[0],
+  rawTarget: string | undefined,
+): PlayrandomTarget | null {
   if (!rawTarget) {
     return {
       userId: ctx.message.author.id,
       historyLabel: `${describeUserName(ctx.message.author)}'s history`,
+    };
+  }
+
+  if (rawTarget.toLowerCase() === "all") {
+    return {
+      historyLabel: "global history",
     };
   }
 
@@ -83,7 +122,9 @@ function parsePlayrandomTarget(ctx: Parameters<BotCommand["execute"]>[0]): Playr
   }
 
   if (/^\d+$/.test(rawTarget)) {
-    const cachedMember = ctx.guild?.members.cache.get(rawTarget)?.user;
+    const cachedMember = ctx.guild && "members" in ctx.guild
+      ? ctx.guild.members.cache.get(rawTarget)?.user
+      : undefined;
     const cachedUser = ctx.message.client?.users.cache.get(rawTarget);
     return {
       userId: rawTarget,
@@ -92,6 +133,10 @@ function parsePlayrandomTarget(ctx: Parameters<BotCommand["execute"]>[0]): Playr
   }
 
   return null;
+}
+
+function isDiscordUserId(value: string): boolean {
+  return /^\d{15,20}$/.test(value);
 }
 
 export function createMusicCommands(bot: GlizzBot): BotCommand[] {
@@ -207,17 +252,18 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "playrandom",
       cog: "music",
-      description: "Queue random songs from saved history.",
+      description: "Queue random songs from a user's history or global history.",
       guildOnly: true,
       async execute(ctx) {
-        if (!ctx.guild || !ctx.member || ctx.args.length === 0 || ctx.args.length > 2) {
-          await ctx.reply("Usage: playrandom <number> [@user/user_id]");
+        const request = parsePlayrandomRequest(ctx);
+        if (!ctx.guild || !ctx.member || !request) {
+          await ctx.reply("Usage: playrandom [number] [all|@user/user_id]");
           return;
         }
 
-        const amount = Number.parseInt(ctx.args[0] ?? "", 10);
+        const amount = request.amount;
         if (Number.isNaN(amount) || amount < 1) {
-          await ctx.reply("Usage: playrandom <number> [@user/user_id]");
+          await ctx.reply("Usage: playrandom [number] [all|@user/user_id]");
           return;
         }
         if (amount > PLAYRANDOM_MAX) {
@@ -225,9 +271,9 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           return;
         }
 
-        const target = parsePlayrandomTarget(ctx);
+        const target = parsePlayrandomTarget(ctx, request.targetArg);
         if (!target) {
-          await ctx.reply("Usage: playrandom <number> [@user/user_id]");
+          await ctx.reply("Usage: playrandom [number] [all|@user/user_id]");
           return;
         }
 
@@ -395,13 +441,12 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
     {
       name: "insert",
       cog: "music",
-      description: "Insert a query at a queue position.",
+      description: "Insert a query at the top of the queue.",
       guildOnly: true,
       async execute(ctx) {
-        const index = Number.parseInt(ctx.args[0] ?? "", 10) - 1;
-        const query = ctx.args.slice(1).join(" ");
-        if (Number.isNaN(index) || !query) {
-          await ctx.reply("Usage: insert <position> <query>");
+        const query = ctx.rawArgs.trim();
+        if (!query) {
+          await ctx.reply("Usage: insert <query>");
           return;
         }
         const resolved = await bot.musicResolver.resolveInput(query, ctx.message.author.id);
@@ -410,7 +455,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           await ctx.reply(resolved.summary);
           return;
         }
-        const item = bot.music.insert(ctx.guild!.id, index, first);
+        const item = bot.music.insert(ctx.guild!.id, 0, first);
         await replyWithMusicEmbed(ctx, buildTrackEmbed("Inserted Next", item));
       },
     },

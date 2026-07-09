@@ -95,3 +95,31 @@ test("song history repository can sample random songs for a specific user", () =
   assert.equal(songs[0]?.song_title, "User One Track");
   assert.equal(songs[0]?.user_id, "user-1");
 });
+
+test("song history repository prefers distinct songs in random samples", () => {
+  const root = path.resolve("test-tmp", "song-history-random-distinct");
+  resetRoot(root);
+  const paths = createTestRuntimePaths(root);
+
+  const repository = new SongHistoryRepository(paths);
+  for (let index = 0; index < 4; index += 1) {
+    repository.recordTrack({
+      title: `Repeated Track ${index}`,
+      url: "https://example.com/watch?v=repeated",
+      requestedBy: "user-1",
+      durationSeconds: 60,
+    });
+  }
+  repository.recordTrack({
+    title: "Different Track",
+    url: "https://example.com/watch?v=different",
+    requestedBy: "user-1",
+    durationSeconds: 70,
+  });
+
+  const songs = repository.getRandomSongs(2, "user-1");
+  repository.close();
+
+  assert.equal(songs.length, 2);
+  assert.equal(new Set(songs.map((song) => song.song_url)).size, 2);
+});
