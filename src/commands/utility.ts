@@ -5,6 +5,22 @@ import type { GlizzBot } from "../bot.js";
 export function createUtilityCommands(bot: GlizzBot): BotCommand[] {
   return [
     {
+      name: "about",
+      cog: "utility",
+      description: "Show bot build and runtime info.",
+      ownerOnly: true,
+      async execute(ctx) {
+        const lines = [
+          `GlizzBot ${bot.runtimeVersion.displayVersion}`,
+          `Commit: ${bot.runtimeVersion.gitCommit ?? "unknown"}`,
+          `Branch: ${bot.runtimeVersion.gitBranch ?? "detached/unknown"}`,
+          `Node: ${process.version}`,
+          `Guilds: ${bot.guilds.cache.size}`,
+        ];
+        await ctx.reply(lines.join("\n"));
+      },
+    },
+    {
       name: "ping",
       cog: "utility",
       description: "Ping the configured guild role or show latency.",

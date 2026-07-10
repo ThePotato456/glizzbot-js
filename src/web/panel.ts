@@ -264,6 +264,7 @@ function buildStatusPayload(bot: GlizzBot) {
   return {
     generatedAt: new Date().toISOString(),
     user: bot.user?.tag ?? null,
+    version: bot.runtimeVersion,
     prefix: bot.config.prefix,
     enabledCogs: [...bot.config.enabledCogs],
     loadedCommands,
@@ -1079,6 +1080,7 @@ function buildPanelHtml(config: AppConfig): string {
       function renderOverview(status) {
         document.getElementById("lastUpdated").textContent = "Updated " + formatDate(status.generatedAt);
         document.getElementById("overviewCards").innerHTML = [
+          ["Version", status.version.displayVersion],
           ["Prefix", status.prefix],
           ["Commands", String(status.loadedCommands.length)],
           ["Cogs", status.enabledCogs.join(", ") || "None"],

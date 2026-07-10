@@ -1,4 +1,5 @@
 import {
+  ActivityType,
   Client,
   Collection,
   GatewayIntentBits,
@@ -11,6 +12,7 @@ import { MusicService } from "./services/musicService.js";
 import { MusicResolverService } from "./services/musicResolverService.js";
 import { ChatService } from "./services/chatService.js";
 import { EventsService } from "./services/eventsService.js";
+import { readRuntimeVersion, type RuntimeVersionInfo } from "./services/runtimeVersionService.js";
 import type { AppConfig, BotCommand, CommandContext, QueueItem, RuntimePaths } from "./types.js";
 import { buildCommands } from "./commands/index.js";
 import { buildTrackEmbed } from "./commands/musicEmbeds.js";
@@ -24,6 +26,7 @@ export class GlizzBot extends Client {
   readonly events = new EventsService();
   readonly configStore: ConfigStore;
   readonly logger: AppLogger;
+  readonly runtimeVersion: RuntimeVersionInfo;
   private lagMs = 0;
 
   constructor(
@@ -42,6 +45,7 @@ export class GlizzBot extends Client {
 
     this.configStore = new ConfigStore(paths);
     this.logger = new AppLogger(paths, config.debug);
+    this.runtimeVersion = readRuntimeVersion(paths.root);
     this.musicResolver = new MusicResolverService(
       paths,
       null,
@@ -62,6 +66,7 @@ export class GlizzBot extends Client {
     this.music.attachDiagnosticMirror((guildId, line) => {
       this.logger.debug(`[music:${guildId}] ${line}`);
     });
+    this.logger.info(`Runtime version: ${this.runtimeVersion.displayVersion}`);
     this.logger.debug(`Voice dependency report:\n${this.music.getDependencyReport()}`);
     this.music.setTrackFinishedHandler(async (guildId, nextTrack) => {
       await this.announceNowPlaying(guildId, nextTrack);
@@ -101,7 +106,8 @@ export class GlizzBot extends Client {
   private registerEventHandlers(): void {
     this.once("clientReady", () => {
       this.ensureGuildConfigsForConnectedGuilds();
-      this.logger.info(`Logged in as ${this.user?.tag ?? "unknown user"}`);
+      this.updatePresence();
+      this.logger.info(`Logged in as ${this.user?.tag ?? "unknown user"} | ${this.runtimeVersion.displayVersion}`);
     });
 
     this.on("guildCreate", async (guild) => {
@@ -245,5 +251,15 @@ export class GlizzBot extends Client {
     if (addedCount > 0) {
       this.logger.info(`Initialized config entries for ${addedCount} connected guild(s) during startup.`);
     }
+  }
+
+  private updatePresence(): void {
+    if (!this.user) {
+      return;
+    }
+
+    this.user.setActivity(this.runtimeVersion.displayVersion, {
+      type: ActivityType.Playing,
+    });
   }
 }
