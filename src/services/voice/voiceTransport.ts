@@ -1,7 +1,7 @@
 import type { GuildMember } from "discord.js";
 import type { Readable } from "node:stream";
 
-export type VoiceConnectionState = "connecting" | "connected" | "disconnected";
+export type VoiceConnectionState = "connecting" | "connected" | "recovering" | "disconnected";
 export type VoicePlaybackState = "idle" | "playing" | "paused";
 
 export interface VoiceTransportCallbacks {

@@ -113,7 +113,7 @@ export interface MusicState {
   isPaused: boolean;
   voiceChannelId: Snowflake | null;
   textChannelId: Snowflake | null;
-  connectionStatus: "disconnected" | "connecting" | "connected" | "idle-disconnect-pending";
+  connectionStatus: "disconnected" | "connecting" | "connected" | "recovering" | "idle-disconnect-pending";
   playbackStatus: "idle" | "playing" | "paused" | "placeholder";
   shouldLeave: boolean;
   timingDebug: boolean;

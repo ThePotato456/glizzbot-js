@@ -40,6 +40,8 @@ const TIMING_SUMMARY_INTERVAL_PACKETS = 100;
 const SCHEDULER_COARSE_SLEEP_MS = 16;
 const SCHEDULER_EARLY_TOLERANCE_MS = 0.75;
 const MAX_DROPPED_FRAMES_PER_TICK = 4;
+const MAX_RECOVERY_ATTEMPTS = 3;
+const RECOVERY_BACKOFF_MS = [500, 1_500, 3_000] as const;
 
 type SupportedEncryptionMode =
   | "aead_aes256_gcm_rtpsize"
@@ -275,6 +277,9 @@ export class DaveVoiceTransport implements VoiceTransport {
   private lastHeartbeatSentAt = 0;
   private wsPingMs = -1;
   private destroyed = false;
+  private recoveryAttempts = 0;
+  private recoveryTimer: NodeJS.Timeout | null = null;
+  private recoveringReason: string | null = null;
 
   private secretKey: Uint8Array | null = null;
   private encryptionMode: SupportedEncryptionMode | null = null;
@@ -339,6 +344,7 @@ export class DaveVoiceTransport implements VoiceTransport {
   disconnect(): void {
     this.logTransportSnapshot("disconnect-requested");
     this.destroyed = true;
+    this.clearRecoveryTimer();
     this.stop();
     this.setSpeaking(false);
     this.cleanupNetwork();
@@ -558,19 +564,23 @@ export class DaveVoiceTransport implements VoiceTransport {
     }
 
     this.endpoint = this.serverUpdate.endpoint;
+    const shouldResume = this.connectionState === "recovering";
     const address = `wss://${this.serverUpdate.endpoint}?v=8&encoding=json`;
     this.log(`Opening voice WebSocket ${address}.`);
     this.ws = new WebSocket(address);
     this.ws.on("open", () => {
       this.log("Voice WebSocket opened.");
       this.logTransportSnapshot("ws-open");
-      this.sendJson(VoiceGatewayOpcode.Identify, {
-        server_id: this.guildId,
-        user_id: this.userId,
-        session_id: this.sessionId,
-        token: this.serverUpdate?.token,
-        ...this.daveSession.getIdentifyData(),
-      });
+      if (shouldResume) {
+        this.sendJson(VoiceGatewayOpcode.Resume, {
+          server_id: this.guildId,
+          session_id: this.sessionId,
+          token: this.serverUpdate?.token,
+        });
+        return;
+      }
+
+      this.sendIdentify();
     });
     this.ws.on("message", (data, isBinary) => {
       if (isBinary) {
@@ -585,15 +595,20 @@ export class DaveVoiceTransport implements VoiceTransport {
       this.log(`Voice WebSocket error: ${err.message}`);
       this.logTransportSnapshot("ws-error", err.message);
       this.callbacks.onPlaybackError?.(err, null);
-      this.rejectConnect(err);
+      if (!this.handleRecoverableTransportLoss(`ws-error:${err.message}`)) {
+        this.rejectConnect(err);
+      }
     });
     this.ws.on("close", (code, reasonBuffer) => {
       const reason = reasonBuffer.toString("utf8");
       this.log(`Voice WebSocket close event code=${code} reason=${reason || "none"}.`);
       this.logTransportSnapshot("ws-close", `code:${code},reason:${reason || "none"}`);
       if (!this.destroyed) {
-        this.rejectConnect(new Error(`Voice WebSocket closed with code ${code}${reason ? ` (${reason})` : ""}.`));
-        this.disconnect();
+        const closeError = new Error(`Voice WebSocket closed with code ${code}${reason ? ` (${reason})` : ""}.`);
+        if (!this.handleRecoverableTransportLoss(`ws-close:${code}:${reason || "none"}`)) {
+          this.rejectConnect(closeError);
+          this.disconnect();
+        }
       }
     });
   }
@@ -633,6 +648,7 @@ export class DaveVoiceTransport implements VoiceTransport {
         return;
       case VoiceGatewayOpcode.Resumed:
         this.log("Voice WebSocket resumed.");
+        this.handleRecoverySuccess("resumed");
         return;
       case VoiceOpcode.CLIENTS_CONNECT:
         if (typeof packet.d.user_id === "string") {
@@ -664,6 +680,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.udpRemotePort = payload.port;
     this.log(`Voice ready received ip=${payload.ip} port=${payload.port} ssrc=${payload.ssrc}.`);
 
+    this.cleanupUdpSocketForReconnect();
     this.udp = dgram.createSocket("udp4");
     this.udp.on("message", (message) => {
       this.handleUdpMessage(message);
@@ -711,6 +728,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.handleDaveTransitionJson(this.daveSession.handleSessionDescription(payload.dave_protocol_version ?? 0));
 
     this.startUdpKeepAlive();
+    this.handleRecoverySuccess("session-description");
     this.setConnectionState("connected");
     this.resolveConnect();
   }
@@ -815,7 +833,9 @@ export class DaveVoiceTransport implements VoiceTransport {
       if (this.lastHeartbeatSentAt !== 0 && this.missedHeartbeats >= HEARTBEAT_MISSES_BEFORE_CLOSE) {
         this.log("Voice WebSocket heartbeat timed out.");
         this.logTransportSnapshot("heartbeat-timeout");
-        this.ws?.close();
+        if (!this.handleRecoverableTransportLoss("heartbeat-timeout")) {
+          this.ws?.close();
+        }
         return;
       }
 
@@ -1169,7 +1189,91 @@ export class DaveVoiceTransport implements VoiceTransport {
   }
 
   private isPlaybackReady(): boolean {
+    if (this.connectionState === "recovering") {
+      return false;
+    }
     return this.daveSession.currentProtocolVersion === 0 || this.daveSession.ready;
+  }
+
+  private sendIdentify(): void {
+    this.sendJson(VoiceGatewayOpcode.Identify, {
+      server_id: this.guildId,
+      user_id: this.userId,
+      session_id: this.sessionId,
+      token: this.serverUpdate?.token,
+      ...this.daveSession.getIdentifyData(),
+    });
+  }
+
+  private handleRecoverableTransportLoss(reason: string): boolean {
+    if (this.destroyed || this.connectionState === "connecting" || !this.sessionId || !this.serverUpdate?.token || !this.serverUpdate.endpoint) {
+      return false;
+    }
+
+    if (this.recoveryTimer) {
+      this.logTransportSnapshot("recovery-failed", `attempt:${this.recoveryAttempts},reason:${reason},status:already-pending`);
+      return true;
+    }
+
+    const nextAttempt = this.recoveryAttempts + 1;
+    if (nextAttempt > MAX_RECOVERY_ATTEMPTS) {
+      this.logTransportSnapshot("recovery-exhausted", `attempt:${this.recoveryAttempts},reason:${reason}`);
+      this.disconnect();
+      return true;
+    }
+
+    this.recoveryAttempts = nextAttempt;
+    this.recoveringReason = reason;
+    this.setConnectionState("recovering");
+    this.pausePlaybackForRecovery();
+    this.setSpeaking(false);
+    this.cleanupWebSocketForRecovery();
+    this.clearHeartbeatState();
+
+    const backoffMs = RECOVERY_BACKOFF_MS[Math.min(nextAttempt - 1, RECOVERY_BACKOFF_MS.length - 1)] ?? RECOVERY_BACKOFF_MS.at(-1)!;
+    this.logTransportSnapshot(nextAttempt === 1 ? "recovery-start" : "recovery-attempt", `attempt:${nextAttempt},reason:${reason},backoffMs:${backoffMs}`);
+
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (this.destroyed || this.connectionState !== "recovering") {
+        return;
+      }
+
+      this.logTransportSnapshot("recovery-attempt", `attempt:${this.recoveryAttempts},reason:${this.recoveringReason ?? "unknown"}`);
+      this.maybeOpenWebSocket();
+    }, backoffMs);
+    this.recoveryTimer.unref();
+    return true;
+  }
+
+  private handleRecoverySuccess(status: string): void {
+    if (this.connectionState !== "recovering") {
+      this.recoveryAttempts = 0;
+      this.recoveringReason = null;
+      return;
+    }
+
+    this.clearRecoveryTimer();
+    this.recoveryAttempts = 0;
+    const reason = this.recoveringReason ?? "unknown";
+    this.recoveringReason = null;
+    this.logTransportSnapshot("recovery-resumed", `status:${status},reason:${reason}`);
+    this.setConnectionState("connected");
+    this.resumePlaybackAfterRecovery();
+  }
+
+  private pausePlaybackForRecovery(): void {
+    if (!this.playback) {
+      return;
+    }
+    this.playback.source.pause();
+  }
+
+  private resumePlaybackAfterRecovery(): void {
+    if (!this.playback || this.playback.paused || !this.isPlaybackReady()) {
+      return;
+    }
+    this.playback.source.resume();
   }
 
   private sendJson(op: number, data: unknown): void {
@@ -1213,6 +1317,7 @@ export class DaveVoiceTransport implements VoiceTransport {
   }
 
   private cleanupNetwork(): void {
+    this.clearRecoveryTimer();
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
@@ -1241,6 +1346,59 @@ export class DaveVoiceTransport implements VoiceTransport {
     }
     this.udpRemoteIp = null;
     this.udpRemotePort = null;
+  }
+
+  private cleanupWebSocketForRecovery(): void {
+    if (!this.ws) {
+      return;
+    }
+
+    const ws = this.ws;
+    this.ws = null;
+    ws.removeAllListeners();
+    try {
+      ws.close();
+    } catch {
+      // Ignore shutdown failures while replacing a stale gateway connection.
+    }
+  }
+
+  private cleanupUdpSocketForReconnect(): void {
+    if (this.udpKeepAliveInterval) {
+      clearInterval(this.udpKeepAliveInterval);
+      this.udpKeepAliveInterval = null;
+    }
+    if (!this.udp) {
+      return;
+    }
+
+    const udp = this.udp;
+    this.udp = null;
+    udp.removeAllListeners();
+    try {
+      udp.close();
+    } catch {
+      // Ignore shutdown failures while replacing a stale UDP socket.
+    }
+  }
+
+  private clearHeartbeatState(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    this.missedHeartbeats = 0;
+    this.lastHeartbeatSentAt = 0;
+    this.wsPingMs = -1;
+  }
+
+  private clearRecoveryTimer(): void {
+    if (!this.recoveryTimer) {
+      return;
+    }
+
+    clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
   }
 
   private sendUdpPacket(packet: Buffer): void {
