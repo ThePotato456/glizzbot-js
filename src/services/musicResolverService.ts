@@ -13,6 +13,101 @@ function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }
 
+function extractFirstPathSegment(pathname: string): string | null {
+  return pathname.split("/").filter(Boolean)[0] ?? null;
+}
+
+function extractVideoIdFromPath(pathname: string): string | null {
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 0) {
+    return null;
+  }
+
+  if (segments[0] === "shorts" || segments[0] === "live" || segments[0] === "embed" || segments[0] === "v") {
+    return segments[1] ?? null;
+  }
+
+  return null;
+}
+
+function buildCanonicalYouTubeWatchUrl(videoId: string, listId?: string | null): string {
+  const normalized = new URL("https://www.youtube.com/watch");
+  normalized.searchParams.set("v", videoId);
+  if (listId) {
+    normalized.searchParams.set("list", listId);
+  }
+  return normalized.toString();
+}
+
+function buildCanonicalYouTubePlaylistUrl(listId: string): string {
+  const normalized = new URL("https://www.youtube.com/playlist");
+  normalized.searchParams.set("list", listId);
+  return normalized.toString();
+}
+
+function normalizeMediaUrl(value: string): string {
+  if (!isHttpUrl(value)) {
+    return value;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return value;
+  }
+
+  const host = url.hostname.toLowerCase();
+  if (host === "music.youtube.com" || host === "m.youtube.com") {
+    url.hostname = "www.youtube.com";
+  }
+  if (url.hostname.toLowerCase() === "youtube-nocookie.com" || url.hostname.toLowerCase() === "www.youtube-nocookie.com") {
+    url.hostname = "www.youtube.com";
+  }
+
+  if (host === "youtu.be") {
+    const videoId = extractFirstPathSegment(url.pathname);
+    if (videoId) {
+      return buildCanonicalYouTubeWatchUrl(videoId, url.searchParams.get("list"));
+    }
+  }
+
+  const normalizedHost = url.hostname.toLowerCase();
+  if (!normalizedHost.includes("youtube.com")) {
+    return url.toString();
+  }
+
+  const pathVideoId = extractVideoIdFromPath(url.pathname);
+  if (pathVideoId) {
+    return buildCanonicalYouTubeWatchUrl(pathVideoId, url.searchParams.get("list"));
+  }
+
+  if (url.pathname === "/watch") {
+    const videoId = url.searchParams.get("v");
+    if (videoId) {
+      return buildCanonicalYouTubeWatchUrl(videoId, url.searchParams.get("list"));
+    }
+  }
+
+  if (url.pathname === "/playlist") {
+    const list = url.searchParams.get("list");
+    if (list) {
+      return buildCanonicalYouTubePlaylistUrl(list);
+    }
+  }
+
+  const listId = url.searchParams.get("list");
+  if (listId) {
+    const videoId = url.searchParams.get("v");
+    if (videoId) {
+      return buildCanonicalYouTubeWatchUrl(videoId, listId);
+    }
+    return buildCanonicalYouTubePlaylistUrl(listId);
+  }
+
+  return new URL(`https://www.youtube.com${url.pathname}`).toString();
+}
+
 function detectSourceType(query: string): DetectedSourceType {
   if (!isHttpUrl(query)) {
     return "search";
@@ -75,7 +170,7 @@ export class MusicResolverService {
   }
 
   async resolveInput(query: string, requestedBy: string): Promise<ResolvedQueueRequest> {
-    const normalized = query.trim();
+    const normalized = normalizeMediaUrl(query.trim());
     const sourceType = detectSourceType(normalized);
 
     switch (sourceType) {

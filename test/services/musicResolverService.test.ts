@@ -150,6 +150,155 @@ test("resolveInput expands YouTube playlist URLs into deferred queue items", asy
   assert.match(result.summary, /Queued 2 track\(s\) from playlist/i);
 });
 
+test("resolveInput normalizes YouTube Music playlist share URLs before resolving", async () => {
+  const paths = createTestRuntimePaths();
+  const inputs: string[] = [];
+  const resolver = new MusicResolverService(paths, async (args) => {
+    inputs.push(args.at(-1) ?? "");
+    return JSON.stringify({
+      title: "Test Playlist",
+      extractor: "youtube:tab",
+      entries: [
+        {
+          id: "abc123",
+          title: "Playlist Track One",
+          ie_key: "Youtube",
+        },
+      ],
+    });
+  });
+
+  const result = await resolver.resolveInput(
+    "https://music.youtube.com/playlist?list=PLZnJ1HJN6CJh_6tSh-KQiFPKeKqsKoPBv&si=WCOznjqY7pZ1IAqj",
+    "user-1",
+  );
+
+  assert.equal(inputs[0], "https://www.youtube.com/playlist?list=PLZnJ1HJN6CJh_6tSh-KQiFPKeKqsKoPBv");
+  assert.equal(result.items.length, 1);
+  assert.match(result.summary, /Queued 1 track\(s\) from playlist/i);
+});
+
+test("resolveInput strips extra YouTube watch parameters but keeps video and playlist ids", async () => {
+  const paths = createTestRuntimePaths();
+  const inputs: string[] = [];
+  const resolver = new MusicResolverService(paths, async (args) => {
+    inputs.push(args.at(-1) ?? "");
+    return JSON.stringify({
+      title: "Watch Result",
+      duration: 123,
+      url: "https://media.example/stream",
+      webpage_url: "https://www.youtube.com/watch?v=abc123&list=playlist42",
+      extractor: "youtube",
+    });
+  });
+
+  await resolver.resolveInput(
+    "https://www.youtube.com/watch?v=abc123&list=playlist42&si=share123&feature=shared",
+    "user-1",
+  );
+
+  assert.equal(inputs[0], "https://www.youtube.com/watch?v=abc123&list=playlist42");
+});
+
+test("resolveInput normalizes youtu.be links into canonical watch URLs", async () => {
+  const paths = createTestRuntimePaths();
+  const inputs: string[] = [];
+  const resolver = new MusicResolverService(paths, async (args) => {
+    inputs.push(args.at(-1) ?? "");
+    return JSON.stringify({
+      title: "Short Link Result",
+      duration: 123,
+      url: "https://media.example/stream",
+      webpage_url: "https://www.youtube.com/watch?v=abc123",
+      extractor: "youtube",
+    });
+  });
+
+  await resolver.resolveInput("https://youtu.be/abc123?si=share123", "user-1");
+
+  assert.equal(inputs[0], "https://www.youtube.com/watch?v=abc123");
+});
+
+test("resolveInput normalizes YouTube shorts URLs into canonical watch URLs", async () => {
+  const paths = createTestRuntimePaths();
+  const inputs: string[] = [];
+  const resolver = new MusicResolverService(paths, async (args) => {
+    inputs.push(args.at(-1) ?? "");
+    return JSON.stringify({
+      title: "Shorts Result",
+      duration: 123,
+      url: "https://media.example/stream",
+      webpage_url: "https://www.youtube.com/watch?v=short123",
+      extractor: "youtube",
+    });
+  });
+
+  await resolver.resolveInput("https://www.youtube.com/shorts/short123?si=share123&feature=share", "user-1");
+
+  assert.equal(inputs[0], "https://www.youtube.com/watch?v=short123");
+});
+
+test("resolveInput normalizes YouTube live URLs into canonical watch URLs", async () => {
+  const paths = createTestRuntimePaths();
+  const inputs: string[] = [];
+  const resolver = new MusicResolverService(paths, async (args) => {
+    inputs.push(args.at(-1) ?? "");
+    return JSON.stringify({
+      title: "Live Result",
+      duration: 123,
+      url: "https://media.example/stream",
+      webpage_url: "https://www.youtube.com/watch?v=live123",
+      extractor: "youtube",
+    });
+  });
+
+  await resolver.resolveInput("https://www.youtube.com/live/live123?feature=share", "user-1");
+
+  assert.equal(inputs[0], "https://www.youtube.com/watch?v=live123");
+});
+
+test("resolveInput normalizes YouTube embed URLs into canonical watch URLs", async () => {
+  const paths = createTestRuntimePaths();
+  const inputs: string[] = [];
+  const resolver = new MusicResolverService(paths, async (args) => {
+    inputs.push(args.at(-1) ?? "");
+    return JSON.stringify({
+      title: "Embed Result",
+      duration: 123,
+      url: "https://media.example/stream",
+      webpage_url: "https://www.youtube.com/watch?v=embed123",
+      extractor: "youtube",
+    });
+  });
+
+  await resolver.resolveInput("https://www.youtube.com/embed/embed123?start=10", "user-1");
+
+  assert.equal(inputs[0], "https://www.youtube.com/watch?v=embed123");
+});
+
+test("resolveInput normalizes playlist-only share links even outside the playlist path", async () => {
+  const paths = createTestRuntimePaths();
+  const inputs: string[] = [];
+  const resolver = new MusicResolverService(paths, async (args) => {
+    inputs.push(args.at(-1) ?? "");
+    return JSON.stringify({
+      title: "List Result",
+      extractor: "youtube:tab",
+      entries: [
+        {
+          id: "abc123",
+          title: "Playlist Track One",
+          ie_key: "Youtube",
+        },
+      ],
+    });
+  });
+
+  await resolver.resolveInput("https://www.youtube.com/watch?list=playlist42&si=share123", "user-1");
+
+  assert.equal(inputs[0], "https://www.youtube.com/playlist?list=playlist42");
+});
+
 test("resolveInput reports playlist expansion failures clearly", async () => {
   const paths = createTestRuntimePaths();
   const resolver = new MusicResolverService(paths, async () => {
