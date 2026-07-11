@@ -1,9 +1,20 @@
-import { ChannelType, EmbedBuilder, PermissionsBitField } from "discord.js";
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelType,
+  ComponentType,
+  EmbedBuilder,
+  PermissionsBitField,
+} from "discord.js";
 import type { BotCommand } from "../types.js";
 import type { GlizzBot } from "../bot.js";
 import { buildTrackEmbed, createMusicEmbed } from "./musicEmbeds.js";
 
 const PLAYRANDOM_MAX = 10;
+const QUEUE_PAGE_SIZE = 10;
+const QUEUE_TITLE_MAX_LENGTH = 300;
+const QUEUE_TIMEOUT_MS = 2 * 60 * 1000;
 
 interface PlayrandomTarget {
   userId?: string;
@@ -15,15 +26,49 @@ interface PlayrandomRequest {
   targetArg?: string;
 }
 
-function buildQueueEmbed(bot: GlizzBot, guildId: string): EmbedBuilder {
+export function buildQueuePages(bot: GlizzBot, guildId: string): EmbedBuilder[] {
   const state = bot.music.getState(guildId);
   if (state.queue.length === 0) {
-    return createMusicEmbed("The queue is empty!");
+    return [createMusicEmbed("The queue is empty!")];
   }
 
-  const lines = state.queue.map((item, index) => `${index + 1}. ${item.title}`);
-  return createMusicEmbed(`**__Queue:__**\n${lines.join("\n")}`)
-    .setFooter({ text: `${state.queue.length} queued track(s)` });
+  const totalPages = Math.ceil(state.queue.length / QUEUE_PAGE_SIZE);
+  const pages: EmbedBuilder[] = [];
+
+  for (let start = 0; start < state.queue.length; start += QUEUE_PAGE_SIZE) {
+    const lines = state.queue.slice(start, start + QUEUE_PAGE_SIZE).map((item, offset) => {
+      const title = item.title.length > QUEUE_TITLE_MAX_LENGTH
+        ? `${item.title.slice(0, QUEUE_TITLE_MAX_LENGTH - 3)}...`
+        : item.title;
+      return `${start + offset + 1}. ${title}`;
+    });
+    const pageNumber = pages.length + 1;
+    pages.push(
+      createMusicEmbed(`**__Queue:__**\n${lines.join("\n")}`)
+        .setFooter({
+          text: `${state.queue.length} queued track(s) | Page ${pageNumber}/${totalPages}`,
+        }),
+    );
+  }
+
+  return pages;
+}
+
+function buildQueueComponents(pageIndex: number, totalPages: number) {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId("queue:prev")
+        .setLabel("Previous")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(pageIndex === 0),
+      new ButtonBuilder()
+        .setCustomId("queue:next")
+        .setLabel("Next")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(pageIndex >= totalPages - 1),
+    ),
+  ];
 }
 
 async function replyWithMusicEmbed(
@@ -332,7 +377,42 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
       description: "Show the queue.",
       guildOnly: true,
       async execute(ctx) {
-        await replyWithMusicEmbed(ctx, buildQueueEmbed(bot, ctx.guild!.id));
+        const pages = buildQueuePages(bot, ctx.guild!.id);
+        let pageIndex = 0;
+        const queueMessage = await ctx.message.reply({
+          embeds: [pages[pageIndex]],
+          components: pages.length > 1 ? buildQueueComponents(pageIndex, pages.length) : [],
+        });
+
+        if (pages.length === 1) {
+          return;
+        }
+
+        const collector = queueMessage.createMessageComponentCollector({
+          componentType: ComponentType.Button,
+          time: QUEUE_TIMEOUT_MS,
+        });
+
+        collector.on("collect", async (interaction) => {
+          if (interaction.user.id !== ctx.message.author.id) {
+            await interaction.reply({
+              content: "Only the person who ran `queue` can use these buttons.",
+              ephemeral: true,
+            }).catch(() => null);
+            return;
+          }
+
+          pageIndex += interaction.customId === "queue:next" ? 1 : -1;
+          pageIndex = Math.max(0, Math.min(pageIndex, pages.length - 1));
+          await interaction.update({
+            embeds: [pages[pageIndex]],
+            components: buildQueueComponents(pageIndex, pages.length),
+          }).catch(() => null);
+        });
+
+        collector.on("end", async () => {
+          await queueMessage.edit({ components: [] }).catch(() => null);
+        });
       },
     },
     {

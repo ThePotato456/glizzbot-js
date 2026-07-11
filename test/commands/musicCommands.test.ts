@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMusicCommands } from "../../src/commands/music.js";
+import { buildQueuePages, createMusicCommands } from "../../src/commands/music.js";
 import type { BotCommand, CommandContext, MusicState, QueueItem } from "../../src/types.js";
 
 interface ReplyRecord {
@@ -172,6 +172,37 @@ function getCommand(commands: BotCommand[], name: string): BotCommand {
   assert.ok(command, `Expected command ${name} to exist`);
   return command;
 }
+
+test("queue embeds paginate tracks and preserve their queue positions", () => {
+  const { bot, state } = createBotMock();
+  state.queue = Array.from({ length: 23 }, (_, index) => ({
+    id: `queue-${index + 1}`,
+    addedAt: Date.now(),
+    ...createQueueItem({ title: `Track ${index + 1}` }),
+  }));
+
+  const pages = buildQueuePages(bot, state.guildId);
+
+  assert.equal(pages.length, 3);
+  assert.match(pages[0]?.data.description ?? "", /1\. Track 1/);
+  assert.match(pages[1]?.data.description ?? "", /11\. Track 11/);
+  assert.match(pages[2]?.data.description ?? "", /23\. Track 23/);
+  assert.equal(pages[2]?.data.footer?.text, "23 queued track(s) | Page 3/3");
+});
+
+test("queue embeds truncate unusually long titles below Discord's description limit", () => {
+  const { bot, state } = createBotMock();
+  state.queue = Array.from({ length: 10 }, (_, index) => ({
+    id: `queue-${index + 1}`,
+    addedAt: Date.now(),
+    ...createQueueItem({ title: `Track ${index + 1} ${"x".repeat(5_000)}` }),
+  }));
+
+  const [page] = buildQueuePages(bot, state.guildId);
+
+  assert.ok((page?.data.description?.length ?? Number.POSITIVE_INFINITY) < 4_096);
+  assert.match(page?.data.description ?? "", /\.\.\./);
+});
 
 test("play replies with usage when no query or url is provided", async () => {
   const { bot } = createBotMock();
