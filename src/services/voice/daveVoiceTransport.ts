@@ -341,8 +341,8 @@ export class DaveVoiceTransport implements VoiceTransport {
     return this.connectPromise;
   }
 
-  disconnect(): void {
-    this.logTransportSnapshot("disconnect-requested");
+  disconnect(reason = "unspecified"): void {
+    this.logTransportSnapshot("disconnect-requested", `reason:${reason}`);
     this.destroyed = true;
     this.clearRecoveryTimer();
     this.stop();
@@ -500,7 +500,7 @@ export class DaveVoiceTransport implements VoiceTransport {
       destroy: () => {
         this.log("Gateway adapter destroy callback invoked.");
         this.logTransportSnapshot("adapter-destroy-callback");
-        this.disconnect();
+        this.disconnect("adapter-destroy-callback");
       },
       onVoiceServerUpdate: (data) => {
         this.serverUpdate = data;
@@ -514,7 +514,7 @@ export class DaveVoiceTransport implements VoiceTransport {
         this.log(`Received VOICE_STATE_UPDATE channel=${state.channel_id ?? "null"} session=${state.session_id ?? "unknown"}.`);
         if (state.channel_id === null && !this.destroyed) {
           this.log("Discord reported that the bot left the voice channel.");
-          this.disconnect();
+          this.disconnect("discord-channel-null");
           return;
         }
         this.maybeOpenWebSocket();
@@ -607,7 +607,7 @@ export class DaveVoiceTransport implements VoiceTransport {
         const closeError = new Error(`Voice WebSocket closed with code ${code}${reason ? ` (${reason})` : ""}.`);
         if (!this.handleRecoverableTransportLoss(`ws-close:${code}:${reason || "none"}`)) {
           this.rejectConnect(closeError);
-          this.disconnect();
+          this.disconnect(`ws-close:${code}`);
         }
       }
     });
@@ -694,7 +694,7 @@ export class DaveVoiceTransport implements VoiceTransport {
       this.log("Voice UDP socket closed.");
       this.logTransportSnapshot("udp-close");
       if (!this.destroyed) {
-        this.disconnect();
+        this.disconnect("udp-close");
       }
     });
 
@@ -1218,7 +1218,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     const nextAttempt = this.recoveryAttempts + 1;
     if (nextAttempt > MAX_RECOVERY_ATTEMPTS) {
       this.logTransportSnapshot("recovery-exhausted", `attempt:${this.recoveryAttempts},reason:${reason}`);
-      this.disconnect();
+      this.disconnect("recovery-exhausted");
       return true;
     }
 

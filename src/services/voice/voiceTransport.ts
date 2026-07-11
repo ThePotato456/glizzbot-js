@@ -17,7 +17,7 @@ export interface VoiceTransport {
   readonly channelId: string;
   readonly guildId: string;
   connect(): Promise<void>;
-  disconnect(): void;
+  disconnect(reason?: string): void;
   play(stream: Readable, playbackId?: string | null): void;
   pause(): boolean;
   resume(): boolean;

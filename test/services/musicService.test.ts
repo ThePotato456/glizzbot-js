@@ -4,6 +4,10 @@ import type { VoiceTransportCallbacks } from "../../src/services/voice/voiceTran
 import { PermissionsBitField } from "discord.js";
 import { MusicService } from "../../src/services/musicService.js";
 import type { QueueItem } from "../../src/types.js";
+import { SongHistoryRepository } from "../../src/services/songHistoryRepository.js";
+import { createTestRuntimePaths } from "../helpers/testRuntimePaths.js";
+import fs from "node:fs";
+import path from "node:path";
 
 function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "id" | "addedAt"> {
   return {
@@ -14,6 +18,11 @@ function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "i
     sourceType: "search",
     ...overrides,
   };
+}
+
+function resetRoot(root: string): void {
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
 }
 
 test("advancePlayback promotes next queue item into current track", async () => {
@@ -258,6 +267,51 @@ test("buildFfmpegArgs forwards yt-dlp stream headers to ffmpeg input options", (
   assert.match(args[headersIndex + 1] ?? "", /Referer: https:\/\/example.com\//);
 });
 
+test("enqueue and insert do not record song history before playback begins", () => {
+  const root = path.resolve("test-tmp", "music-service-history-queue-only");
+  resetRoot(root);
+  const paths = createTestRuntimePaths(root);
+  const service = new MusicService(1000, true, false, {
+    databaseFile: paths.databaseFile,
+    legacyDatabaseFile: paths.legacyDatabaseFile,
+  });
+
+  service.enqueue("guild-1", createQueueItem({ title: "Queued Only" }));
+  service.insert("guild-1", 0, createQueueItem({ title: "Inserted Only" }));
+
+  const repository = new SongHistoryRepository(paths);
+  const count = repository.countSongs();
+  repository.close();
+
+  assert.equal(count, 0);
+});
+
+test("successful playback start records song history", () => {
+  const root = path.resolve("test-tmp", "music-service-history-playback");
+  resetRoot(root);
+  const paths = createTestRuntimePaths(root);
+  const service = new MusicService(1000, true, false, {
+    databaseFile: paths.databaseFile,
+    legacyDatabaseFile: paths.legacyDatabaseFile,
+  });
+
+  (service as any).recordPlaybackHistory({
+    title: "Played Track",
+    url: "https://example.com/watch?v=played",
+    requestedBy: "user-1",
+    durationSeconds: 120,
+  });
+
+  const repository = new SongHistoryRepository(paths);
+  const latest = repository.getLatestSong();
+  repository.close();
+
+  assert.ok(latest);
+  assert.equal(latest?.song_title, "Played Track");
+  assert.equal(latest?.song_url, "https://example.com/watch?v=played");
+  assert.equal(latest?.user_id, "user-1");
+});
+
 test("stop schedules idle disconnect when the guild should leave and voice is connected", async () => {
   const service = new MusicService(20, true, false);
   const state = service.getState("guild-1");
@@ -456,11 +510,14 @@ test("ensureVoiceConnection fails fast when the bot lacks view-channel permissio
 
 test("stale playback-finished callbacks do not clear the replacement track", async () => {
   let callbacks: VoiceTransportCallbacks | null = null;
+  let disconnectReason: string | null = null;
   const transport = {
     guildId: "guild-1",
     channelId: "voice-1",
     connect: async () => undefined,
-    disconnect: () => undefined,
+    disconnect: (reason?: string) => {
+      disconnectReason = reason ?? null;
+    },
     play: (_stream: unknown, _playbackId?: string | null) => undefined,
     pause: () => false,
     resume: () => false,
@@ -534,6 +591,53 @@ test("stale playback-finished callbacks do not clear the replacement track", asy
   assert.equal(state.current?.title, "Second");
   assert.equal(state.queue.length, 0);
   assert.equal(state.playbackStatus, "playing");
+  assert.equal(disconnectReason, null);
+});
+
+test("disconnect forwards a labeled reason into voice teardown diagnostics", () => {
+  const diagnostics: string[] = [];
+  let receivedReason: string | null = null;
+  const service = new MusicService(
+    1000,
+    true,
+    false,
+    null,
+    () => ({
+      guildId: "guild-1",
+      channelId: "voice-1",
+      connect: async () => undefined,
+      disconnect: (reason?: string) => {
+        receivedReason = reason ?? null;
+      },
+      play: () => undefined,
+      pause: () => false,
+      resume: () => false,
+      stop: () => undefined,
+      isConnected: () => true,
+      getDebugState: () => "connected",
+    }) as never,
+  );
+  service.attachDiagnosticMirror((_guildId, line) => {
+    diagnostics.push(line);
+  });
+
+  (service as any).sessions.set("guild-1", {
+    transport: {
+      disconnect: (reason?: string) => {
+        receivedReason = reason ?? null;
+      },
+      stop: () => undefined,
+    },
+    idleTimer: null,
+    ffmpeg: null,
+    encoder: null,
+    playbackId: null,
+  });
+
+  service.disconnect("guild-1", "manual-leave");
+
+  assert.equal(receivedReason, "manual-leave");
+  assert.ok(diagnostics.some((line) => line.includes("Destroying voice connection (reason: manual-leave).")));
 });
 
 test("automatic playback failure notifies the track-finished handler with the replacement track", async () => {

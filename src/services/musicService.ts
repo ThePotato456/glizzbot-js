@@ -87,7 +87,6 @@ export class MusicService {
       addedAt: Date.now(),
     };
     state.queue.push(queueItem);
-    this.songHistory?.recordTrack(queueItem);
     return queueItem;
   }
 
@@ -171,7 +170,7 @@ export class MusicService {
     }
 
     if (existing) {
-      this.clearSession(guildId, true);
+      this.clearSession(guildId, true, "replace-session");
     }
 
     let session: GuildVoiceSession | null = null;
@@ -264,7 +263,7 @@ export class MusicService {
     state.connectionStatus = "disconnected";
     state.playbackStatus = "idle";
     state.isPaused = false;
-    this.clearSession(guildId, true);
+    this.clearSession(guildId, true, reason);
   }
 
   getVoiceSummary(guildId: string): string {
@@ -370,7 +369,6 @@ export class MusicService {
     const state = this.getState(guildId);
     const queueItem = this.materializeQueueItem(item);
     state.queue.splice(Math.max(0, index), 0, queueItem);
-    this.songHistory?.recordTrack(queueItem);
     return queueItem;
   }
 
@@ -537,8 +535,13 @@ DAVE
     session.ffmpeg = ffmpeg;
     session.encoder = encoder;
     session.transport.play(encoder, playbackId);
+    this.recordPlaybackHistory(state.current);
     state.playbackStatus = "playing";
     this.recordDiagnostic(guildId, `Started DAVE playback for ${state.current.title}.`);
+  }
+
+  private recordPlaybackHistory(track: Pick<QueueItem, "title" | "url" | "requestedBy" | "durationSeconds">): void {
+    this.songHistory?.recordTrack(track);
   }
 
   private buildFfmpegArgs(track: QueueItem): string[] {
@@ -632,7 +635,7 @@ DAVE
     legacyPlayer?.stop?.(true);
   }
 
-  private clearSession(guildId: string, destroyConnection = false): void {
+  private clearSession(guildId: string, destroyConnection = false, destroyReason = "unspecified"): void {
     const session = this.sessions.get(guildId);
     if (!session) {
       return;
@@ -648,8 +651,8 @@ DAVE
 
     if (destroyConnection) {
       const legacyConnection = Reflect.get(session as object, "connection") as { destroy?: () => void } | undefined;
-      this.recordDiagnostic(guildId, "Destroying voice connection.");
-      session.transport?.disconnect();
+      this.recordDiagnostic(guildId, `Destroying voice connection (reason: ${destroyReason}).`);
+      session.transport?.disconnect(destroyReason);
       legacyConnection?.destroy?.();
     }
   }
