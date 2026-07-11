@@ -204,6 +204,71 @@ test("queue embeds truncate unusually long titles below Discord's description li
   assert.match(page?.data.description ?? "", /\.\.\./);
 });
 
+test("queue pagination restricts controls, navigates pages, and removes expired buttons", async () => {
+  const { bot, state } = createBotMock();
+  state.queue = Array.from({ length: 11 }, (_, index) => ({
+    id: `queue-${index + 1}`,
+    addedAt: Date.now(),
+    ...createQueueItem({ title: `Track ${index + 1}` }),
+  }));
+
+  let collectHandler: ((interaction: {
+    user: { id: string };
+    customId: string;
+    reply: (payload: unknown) => Promise<void>;
+    update: (payload: { embeds: Array<{ data?: { description?: string } }> }) => Promise<void>;
+  }) => Promise<void>) | undefined;
+  let endHandler: (() => Promise<void>) | undefined;
+  const edits: unknown[] = [];
+  const replies: unknown[] = [];
+  const updates: Array<{ embeds: Array<{ data?: { description?: string } }> }> = [];
+  const queueMessage = {
+    createMessageComponentCollector: () => ({
+      on: (event: string, handler: unknown) => {
+        if (event === "collect") {
+          collectHandler = handler as typeof collectHandler;
+        } else if (event === "end") {
+          endHandler = handler as typeof endHandler;
+        }
+      },
+    }),
+    edit: async (payload: unknown) => {
+      edits.push(payload);
+    },
+  };
+  const message = {
+    author: { id: "user-1", tag: "tester#0001", username: "tester" },
+    mentions: { users: { first: () => null } },
+    reply: async () => queueMessage,
+  };
+  const { ctx } = createCommandContext({ message: message as never });
+  const command = getCommand(createMusicCommands(bot), "queue");
+
+  await command.execute(ctx);
+  assert.ok(collectHandler);
+  assert.ok(endHandler);
+
+  await collectHandler({
+    user: { id: "someone-else" },
+    customId: "queue:next",
+    reply: async (payload) => { replies.push(payload); },
+    update: async (payload) => { updates.push(payload); },
+  });
+  assert.equal(replies.length, 1);
+  assert.equal(updates.length, 0);
+
+  await collectHandler({
+    user: { id: "user-1" },
+    customId: "queue:next",
+    reply: async (payload) => { replies.push(payload); },
+    update: async (payload) => { updates.push(payload); },
+  });
+  assert.match(updates[0]?.embeds[0]?.data?.description ?? "", /11\. Track 11/);
+
+  await endHandler();
+  assert.deepEqual(edits, [{ components: [] }]);
+});
+
 test("play replies with usage when no query or url is provided", async () => {
   const { bot } = createBotMock();
   const command = getCommand(createMusicCommands(bot), "play");

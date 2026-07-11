@@ -5,9 +5,7 @@ import { PermissionsBitField } from "discord.js";
 import { MusicService } from "../../src/services/musicService.js";
 import type { QueueItem } from "../../src/types.js";
 import { SongHistoryRepository } from "../../src/services/songHistoryRepository.js";
-import { createTestRuntimePaths } from "../helpers/testRuntimePaths.js";
-import fs from "node:fs";
-import path from "node:path";
+import { createTestRuntimePaths, createUniqueTestRoot } from "../helpers/testRuntimePaths.js";
 
 function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "id" | "addedAt"> {
   return {
@@ -18,11 +16,6 @@ function createQueueItem(overrides: Partial<QueueItem> = {}): Omit<QueueItem, "i
     sourceType: "search",
     ...overrides,
   };
-}
-
-function resetRoot(root: string): void {
-  fs.rmSync(root, { recursive: true, force: true });
-  fs.mkdirSync(root, { recursive: true });
 }
 
 test("advancePlayback promotes next queue item into current track", async () => {
@@ -268,8 +261,7 @@ test("buildFfmpegArgs forwards yt-dlp stream headers to ffmpeg input options", (
 });
 
 test("enqueue and insert do not record song history before playback begins", () => {
-  const root = path.resolve("test-tmp", "music-service-history-queue-only");
-  resetRoot(root);
+  const root = createUniqueTestRoot("music-service-history-queue-only");
   const paths = createTestRuntimePaths(root);
   const service = new MusicService(1000, true, false, {
     databaseFile: paths.databaseFile,
@@ -287,8 +279,7 @@ test("enqueue and insert do not record song history before playback begins", () 
 });
 
 test("successful playback start records song history", () => {
-  const root = path.resolve("test-tmp", "music-service-history-playback");
-  resetRoot(root);
+  const root = createUniqueTestRoot("music-service-history-playback");
   const paths = createTestRuntimePaths(root);
   const service = new MusicService(1000, true, false, {
     databaseFile: paths.databaseFile,

@@ -3,16 +3,10 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SongHistoryRepository } from "../../src/services/songHistoryRepository.js";
-import { createTestRuntimePaths } from "../helpers/testRuntimePaths.js";
-
-function resetRoot(root: string): void {
-  fs.rmSync(root, { recursive: true, force: true });
-  fs.mkdirSync(root, { recursive: true });
-}
+import { createTestRuntimePaths, createUniqueTestRoot } from "../helpers/testRuntimePaths.js";
 
 test("song history repository imports the legacy database when the local database is missing", () => {
-  const root = path.resolve("test-tmp", "song-history-import");
-  resetRoot(root);
+  const root = createUniqueTestRoot("song-history-import");
   const paths = createTestRuntimePaths(root);
   fs.mkdirSync(path.dirname(paths.legacyDatabaseFile), { recursive: true });
   fs.copyFileSync(path.resolve("..", "GlizzBot", "config", "database.db"), paths.legacyDatabaseFile);
@@ -26,8 +20,7 @@ test("song history repository imports the legacy database when the local databas
 });
 
 test("song history repository records tracks using the legacy schema", () => {
-  const root = path.resolve("test-tmp", "song-history-write");
-  resetRoot(root);
+  const root = createUniqueTestRoot("song-history-write");
   const paths = createTestRuntimePaths(root);
 
   const repository = new SongHistoryRepository(paths);
@@ -48,8 +41,7 @@ test("song history repository records tracks using the legacy schema", () => {
 });
 
 test("song history repository normalizes oversized or blank values before writing", () => {
-  const root = path.resolve("test-tmp", "song-history-normalize");
-  resetRoot(root);
+  const root = createUniqueTestRoot("song-history-normalize");
   const paths = createTestRuntimePaths(root);
 
   const repository = new SongHistoryRepository(paths);
@@ -70,8 +62,7 @@ test("song history repository normalizes oversized or blank values before writin
 });
 
 test("song history repository can sample random songs for a specific user", () => {
-  const root = path.resolve("test-tmp", "song-history-random");
-  resetRoot(root);
+  const root = createUniqueTestRoot("song-history-random");
   const paths = createTestRuntimePaths(root);
 
   const repository = new SongHistoryRepository(paths);
@@ -97,8 +88,7 @@ test("song history repository can sample random songs for a specific user", () =
 });
 
 test("song history repository prefers distinct songs in random samples", () => {
-  const root = path.resolve("test-tmp", "song-history-random-distinct");
-  resetRoot(root);
+  const root = createUniqueTestRoot("song-history-random-distinct");
   const paths = createTestRuntimePaths(root);
 
   const repository = new SongHistoryRepository(paths);

@@ -1,5 +1,12 @@
+import fs from "node:fs";
 import path from "node:path";
 import type { RuntimePaths } from "../../src/types.js";
+
+export function createUniqueTestRoot(name: string): string {
+  const base = path.resolve("test-tmp");
+  fs.mkdirSync(base, { recursive: true });
+  return fs.mkdtempSync(path.join(base, `${name}-`));
+}
 
 export function createTestRuntimePaths(root = path.resolve("test-tmp")): RuntimePaths {
   return {
