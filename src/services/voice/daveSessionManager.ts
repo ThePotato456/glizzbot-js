@@ -9,6 +9,8 @@ import {
 } from "@snazzah/davey";
 import {
   VoiceOpcode,
+  parseDaveBinaryPacket,
+  type DaveBinaryPacket,
   type DaveExecuteTransitionPayload,
   type DaveGatewayAction,
   type DavePrepareEpochPayload,
@@ -19,6 +21,7 @@ interface DaveSessionLike {
   readonly ready: boolean;
   readonly status: SessionStatus;
   readonly voicePrivacyCode: string;
+  readonly epoch?: bigint | null;
   reinit(protocolVersion: number, userId: string, channelId: string): void;
   reset(): void;
   setExternalSender(externalSenderData: Buffer): void;
@@ -41,6 +44,7 @@ export type DaveSessionFactory = (protocolVersion: number, userId: string, chann
 
 export class DaveSessionManager {
   private readonly pendingTransitions = new Map<number, number>();
+  private readonly pendingMediaTransitions = new Set<number>();
   private readonly recognizedUserIds = new Set<string>();
   private protocolVersion = 0;
   private downgraded = false;
@@ -51,6 +55,7 @@ export class DaveSessionManager {
     private readonly channelId: string,
     private readonly sessionFactory: DaveSessionFactory = (protocolVersion, nextUserId, nextChannelId) =>
       new DAVESession(protocolVersion, nextUserId, nextChannelId),
+    private readonly isKnownVoiceUser: (userId: string) => boolean = () => false,
   ) {}
 
   get maxProtocolVersion(): number {
@@ -62,11 +67,29 @@ export class DaveSessionManager {
   }
 
   get ready(): boolean {
-    return this.protocolVersion !== 0 && Boolean(this.session?.ready);
+    return this.protocolVersion !== 0
+      && this.pendingMediaTransitions.size === 0
+      && Boolean(this.session?.ready);
   }
 
   get currentVoicePrivacyCode(): string {
     return this.session?.voicePrivacyCode ?? "";
+  }
+
+  get currentSessionStatus(): SessionStatus | null {
+    return this.session?.status ?? null;
+  }
+
+  get currentEpoch(): string | null {
+    return this.session?.epoch?.toString() ?? null;
+  }
+
+  get pendingTransitionCount(): number {
+    return this.pendingTransitions.size;
+  }
+
+  get recognizedUserCount(): number {
+    return this.recognizedUserIds.size;
   }
 
   getCurrentUserIds(): string[] {
@@ -99,6 +122,12 @@ export class DaveSessionManager {
   }
 
   handleSessionDescription(protocolVersion: number): DaveGatewayAction[] {
+    if (!Number.isSafeInteger(protocolVersion) || protocolVersion < 0 || protocolVersion > this.maxProtocolVersion) {
+      return [this.log("warn", `Ignoring unsupported DAVE session protocol version ${protocolVersion}.`)];
+    }
+    this.pendingTransitions.clear();
+    this.pendingMediaTransitions.clear();
+    this.downgraded = false;
     this.protocolVersion = protocolVersion;
     const actions = this.reinitializeSession();
     actions.unshift(this.log("debug", `DAVE session description received (v${protocolVersion})`));
@@ -128,7 +157,12 @@ export class DaveSessionManager {
     }
 
     if (payload.protocol_version === 0) {
-      this.session?.setPassthroughMode(true, 120);
+      try {
+        this.session?.setPassthroughMode(true, 120);
+      } catch (error) {
+        actions.push(this.operationError("enable-downgrade-passthrough", error, payload.transition_id));
+        return actions;
+      }
     }
 
     actions.push(this.sendJson(VoiceOpcode.DAVE_TRANSITION_READY, { transition_id: payload.transition_id }));
@@ -143,22 +177,22 @@ export class DaveSessionManager {
   }
 
   handleBinaryMessage(message: Buffer): DaveGatewayAction[] {
-    if (message.length < 3) {
-      return [this.log("warn", "Received an undersized DAVE binary packet.")];
+    const parsed = parseDaveBinaryPacket(message);
+    if (!parsed.ok) {
+      return [this.log("warn", parsed.error)];
     }
 
-    const opcode = message.readUInt8(2);
-    switch (opcode) {
-      case VoiceOpcode.MLS_EXTERNAL_SENDER:
-        return this.handleMlsExternalSender(message.subarray(3));
-      case VoiceOpcode.MLS_PROPOSALS:
-        return this.handleMlsProposals(message);
-      case VoiceOpcode.MLS_ANNOUNCE_COMMIT_TRANSITION:
-        return this.handleMlsCommitTransition(message);
-      case VoiceOpcode.MLS_WELCOME:
-        return this.handleMlsWelcome(message);
+    switch (parsed.value.kind) {
+      case "external-sender":
+        return this.handleMlsExternalSender(parsed.value.payload);
+      case "proposals":
+        return this.handleMlsProposals(parsed.value);
+      case "commit":
+        return this.handleMlsCommitTransition(parsed.value);
+      case "welcome":
+        return this.handleMlsWelcome(parsed.value);
       default:
-        return [this.log("debug", `Ignoring unsupported DAVE binary opcode ${opcode}.`)];
+        return [this.log("debug", `Ignoring unsupported DAVE binary opcode ${parsed.value.opcode}.`)];
     }
   }
 
@@ -187,17 +221,21 @@ export class DaveSessionManager {
       return [this.log("warn", "Received MLS external sender before the DAVE session was initialized.")];
     }
 
-    this.session.setExternalSender(payload);
-    return [this.log("debug", "Stored MLS external sender for the DAVE session.")];
+    try {
+      this.session.setExternalSender(payload);
+      return [this.log("debug", "Stored MLS external sender for the DAVE session.")];
+    } catch (error) {
+      return [this.operationError("set-external-sender", error)];
+    }
   }
 
-  private handleMlsProposals(message: Buffer): DaveGatewayAction[] {
+  private handleMlsProposals(packet: Extract<DaveBinaryPacket, { kind: "proposals" }>): DaveGatewayAction[] {
     if (!this.session) {
       return [this.log("warn", "Received MLS proposals before the DAVE session was initialized.")];
     }
 
-    const operationType = message.readUInt8(3) as ProposalsOperationType;
-    const proposals = message.subarray(4);
+    const operationType = packet.operationType as ProposalsOperationType;
+    const proposals = packet.payload;
     let commit: Buffer | undefined;
     let welcome: Buffer | undefined;
     try {
@@ -213,15 +251,21 @@ export class DaveSessionManager {
       }
 
       const unexpectedUserId = errorMessage.match(/UnexpectedUser\(([^)]+)\)/)?.[1];
-      if (unexpectedUserId) {
-        this.recognizedUserIds.add(unexpectedUserId);
+      if (!unexpectedUserId || !/^\d+$/.test(unexpectedUserId) || !this.isKnownVoiceUser(unexpectedUserId)) {
+        return [this.log(
+          "warn",
+          `MLS proposals rejected an unrecognized voice user: ${unexpectedUserId ?? "unknown"}.`,
+          "dave-participant-validation-failed",
+          `userId:${unexpectedUserId ?? "unknown"}`,
+        )];
       }
+      this.recognizedUserIds.add(unexpectedUserId);
 
       try {
         ({ commit, welcome } = this.session.processProposals(
           operationType,
           proposals,
-          null,
+          [...this.recognizedUserIds],
         ));
       } catch (retryError) {
         return [
@@ -245,9 +289,12 @@ export class DaveSessionManager {
     return actions;
   }
 
-  private handleMlsCommitTransition(message: Buffer): DaveGatewayAction[] {
+  private handleMlsCommitTransition(
+    packet: Extract<DaveBinaryPacket, { kind: "commit" | "welcome" }>,
+  ): DaveGatewayAction[] {
     return this.handleCommitLikeMessage(
-      message,
+      packet.transitionId,
+      packet.payload,
       "commit",
       (payload) => {
         this.session!.processCommit(payload);
@@ -255,9 +302,12 @@ export class DaveSessionManager {
     );
   }
 
-  private handleMlsWelcome(message: Buffer): DaveGatewayAction[] {
+  private handleMlsWelcome(
+    packet: Extract<DaveBinaryPacket, { kind: "commit" | "welcome" }>,
+  ): DaveGatewayAction[] {
     return this.handleCommitLikeMessage(
-      message,
+      packet.transitionId,
+      packet.payload,
       "welcome",
       (payload) => {
         this.session!.processWelcome(payload);
@@ -266,7 +316,8 @@ export class DaveSessionManager {
   }
 
   private handleCommitLikeMessage(
-    message: Buffer,
+    transitionId: number,
+    payload: Buffer,
     label: "commit" | "welcome",
     processor: (payload: Buffer) => void,
   ): DaveGatewayAction[] {
@@ -274,20 +325,25 @@ export class DaveSessionManager {
       return [this.log("warn", `Received MLS ${label} before the DAVE session was initialized.`)];
     }
 
-    const transitionId = message.readUInt16BE(3);
     try {
-      processor(message.subarray(5));
+      processor(payload);
       const actions: DaveGatewayAction[] = [
         this.log("debug", `MLS ${label} processed (transition id: ${transitionId})`),
       ];
       if (transitionId !== 0) {
         this.pendingTransitions.set(transitionId, this.protocolVersion);
+        this.pendingMediaTransitions.add(transitionId);
         actions.push(this.sendJson(VoiceOpcode.DAVE_TRANSITION_READY, { transition_id: transitionId }));
       }
       return actions;
     } catch (error) {
       return [
-        this.log("warn", `MLS ${label} errored: ${error instanceof Error ? error.message : String(error)}`),
+        this.log(
+          "warn",
+          `MLS ${label} errored: ${error instanceof Error ? error.message : String(error)}`,
+          "dave-mls-resync",
+          `transitionId:${transitionId},messageType:${label}`,
+        ),
         this.sendJson(VoiceOpcode.MLS_INVALID_COMMIT_WELCOME, { transition_id: transitionId }),
         ...this.reinitializeSession(),
       ];
@@ -309,34 +365,47 @@ export class DaveSessionManager {
       actions.push(this.log("debug", "DAVE protocol downgraded."));
     } else if (transitionId > 0 && this.downgraded) {
       this.downgraded = false;
-      this.session?.setPassthroughMode(true, 10);
+      try {
+        this.session?.setPassthroughMode(true, 10);
+      } catch (error) {
+        actions.push(this.operationError("enable-upgrade-passthrough", error, transitionId));
+      }
       actions.push(this.log("debug", "DAVE protocol upgraded."));
     }
 
     actions.push(this.log("debug", `DAVE transition executed (v${oldVersion} -> v${this.protocolVersion}, id: ${transitionId})`));
     this.pendingTransitions.delete(transitionId);
+    this.pendingMediaTransitions.delete(transitionId);
     return actions;
   }
 
   private reinitializeSession(): DaveGatewayAction[] {
     if (this.protocolVersion > 0) {
-      if (this.session) {
-        this.session.reinit(this.protocolVersion, this.userId, this.channelId);
-      } else {
-        this.session = this.sessionFactory(this.protocolVersion, this.userId, this.channelId);
+      try {
+        if (this.session) {
+          this.session.reinit(this.protocolVersion, this.userId, this.channelId);
+        } else {
+          this.session = this.sessionFactory(this.protocolVersion, this.userId, this.channelId);
+        }
+
+        return [
+          this.log("debug", `DAVE session initialized for protocol version ${this.protocolVersion}`),
+          this.sendBinary(VoiceOpcode.MLS_KEY_PACKAGE, this.session.getSerializedKeyPackage()),
+        ];
+      } catch (error) {
+        return [this.operationError("initialize-session-or-key-package", error)];
       }
-
-      return [
-        this.log("debug", `DAVE session initialized for protocol version ${this.protocolVersion}`),
-        this.sendBinary(VoiceOpcode.MLS_KEY_PACKAGE, this.session.getSerializedKeyPackage()),
-      ];
     }
 
-    this.session?.reset();
-    if (this.session) {
-      this.session.setPassthroughMode(true, 10);
+    try {
+      this.session?.reset();
+      if (this.session) {
+        this.session.setPassthroughMode(true, 10);
+      }
+      return [this.log("debug", "DAVE session reset.")];
+    } catch (error) {
+      return [this.operationError("reset-session", error)];
     }
-    return [this.log("debug", "DAVE session reset.")];
   }
 
   private sendJson(op: VoiceOpcode, data: Record<string, unknown>): DaveGatewayAction {
@@ -355,11 +424,23 @@ export class DaveSessionManager {
     };
   }
 
-  private log(level: "debug" | "warn", message: string): DaveGatewayAction {
+  private log(level: "debug" | "warn", message: string, event?: string, extra?: string): DaveGatewayAction {
     return {
       kind: "log",
       level,
       message,
+      ...(event === undefined ? {} : { event }),
+      ...(extra === undefined ? {} : { extra }),
+    };
+  }
+
+  private operationError(operation: string, error: unknown, transitionId?: number): DaveGatewayAction {
+    return {
+      kind: "failure",
+      operation,
+      message: error instanceof Error ? error.message : String(error),
+      protocolVersion: this.protocolVersion,
+      ...(transitionId === undefined ? {} : { transitionId }),
     };
   }
 }

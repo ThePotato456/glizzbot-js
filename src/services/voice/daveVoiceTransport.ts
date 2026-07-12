@@ -16,9 +16,10 @@ import { DaveSessionManager } from "./daveSessionManager.js";
 import {
   VoiceOpcode,
   type DaveGatewayAction,
-  type DavePrepareEpochPayload,
-  type DavePrepareTransitionPayload,
-  type DaveExecuteTransitionPayload,
+  parseDaveExecuteTransitionPayload,
+  parseDaveBinaryPacket,
+  parseDavePrepareEpochPayload,
+  parseDavePrepareTransitionPayload,
 } from "./daveProtocol.js";
 import type {
   VoiceConnectionState,
@@ -42,6 +43,8 @@ const SCHEDULER_EARLY_TOLERANCE_MS = 0.75;
 const MAX_DROPPED_FRAMES_PER_TICK = 4;
 const MAX_RECOVERY_ATTEMPTS = 3;
 const RECOVERY_BACKOFF_MS = [500, 1_500, 3_000] as const;
+const DAVE_RESUME_RECONCILE_MS = 100;
+const DAVE_READINESS_TIMEOUT_MS = 15_000;
 
 type SupportedEncryptionMode =
   | "aead_aes256_gcm_rtpsize"
@@ -140,6 +143,10 @@ export interface VoiceTransportDiagnosticSnapshot {
   daveProtocolVersion: number;
   daveReady: boolean;
   davePrivacyCode: string | null;
+  daveSessionStatus: number | null;
+  daveEpoch: string | null;
+  davePendingTransitions: number;
+  daveRecognizedUsers: number;
   missedHeartbeats: number;
   lastHeartbeatAgeMs: number | null;
   wsPingMs: number;
@@ -181,6 +188,14 @@ export function planPlaybackDispatch(now: number, scheduledAt: number): Playback
   };
 }
 
+export function shouldLogPlaybackTickerExit(
+  code: number,
+  isActiveTicker: boolean,
+  terminationExpected: boolean,
+): boolean {
+  return code !== 0 && isActiveTicker && !terminationExpected;
+}
+
 export function formatVoiceTransportDiagnosticSnapshot(snapshot: VoiceTransportDiagnosticSnapshot): string {
   const fields = [
     `guild=${snapshot.guildId}`,
@@ -193,7 +208,7 @@ export function formatVoiceTransportDiagnosticSnapshot(snapshot: VoiceTransportD
     `ws=${snapshot.wsState}`,
     `udp=${snapshot.udpReady ? "ready" : "none"}`,
     `udpRemote=${snapshot.udpRemote ?? "none"}`,
-    `dave=v${snapshot.daveProtocolVersion}${snapshot.daveReady ? ":ready" : ":pending"}:${snapshot.davePrivacyCode ?? "none"}`,
+    `dave=v${snapshot.daveProtocolVersion}${snapshot.daveReady ? ":ready" : ":pending"}:${snapshot.davePrivacyCode ?? "none"},status:${snapshot.daveSessionStatus ?? "none"},epoch:${snapshot.daveEpoch ?? "none"},transitions:${snapshot.davePendingTransitions},recognized:${snapshot.daveRecognizedUsers}`,
     `heartbeat=missed:${snapshot.missedHeartbeats},lastAgeMs:${snapshot.lastHeartbeatAgeMs ?? "never"},pingMs:${snapshot.wsPingMs},seq:${snapshot.lastGatewaySequence}`,
     `playbackActive=${snapshot.playbackActive}`,
     `playbackId=${snapshot.playbackId ?? "none"}`,
@@ -279,6 +294,8 @@ export class DaveVoiceTransport implements VoiceTransport {
   private destroyed = false;
   private recoveryAttempts = 0;
   private recoveryTimer: NodeJS.Timeout | null = null;
+  private recoveryReconcileTimer: NodeJS.Timeout | null = null;
+  private daveReadinessTimer: NodeJS.Timeout | null = null;
   private recoveringReason: string | null = null;
 
   private secretKey: Uint8Array | null = null;
@@ -304,7 +321,12 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.guildId = member.guild.id;
     this.channelId = voiceChannel.id;
     this.userId = member.client.user?.id ?? member.guild.members.me?.id ?? "";
-    this.daveSession = new DaveSessionManager(this.userId, this.channelId);
+    this.daveSession = new DaveSessionManager(
+      this.userId,
+      this.channelId,
+      undefined,
+      (userId) => voiceChannel.members.has(userId),
+    );
     this.daveSession.setRecognizedUserIds([...voiceChannel.members.keys(), this.userId].filter(Boolean));
   }
 
@@ -433,6 +455,7 @@ export class DaveVoiceTransport implements VoiceTransport {
       stream.pause();
       this.playback.daveWaitLogged = true;
       this.log("Waiting for the DAVE session to become ready before streaming audio.");
+      this.startDaveReadinessTimeout();
     } else {
       stream.resume();
     }
@@ -469,6 +492,7 @@ export class DaveVoiceTransport implements VoiceTransport {
   }
 
   stop(): void {
+    this.clearDaveReadinessTimer();
     if (!this.playback) {
       this.setPlaybackState("idle");
       return;
@@ -489,7 +513,7 @@ export class DaveVoiceTransport implements VoiceTransport {
 
   getDebugState(): string {
     const daveMode = this.daveSession.currentProtocolVersion > 0
-      ? `DAVE v${this.daveSession.currentProtocolVersion}${this.daveSession.ready ? ` (${this.daveSession.currentVoicePrivacyCode || "ready"})` : " (pending)"}`
+      ? `DAVE v${this.daveSession.currentProtocolVersion}${this.daveSession.ready ? ` (${this.daveSession.currentVoicePrivacyCode || "ready"})` : " (pending)"}, status=${this.daveSession.currentSessionStatus ?? "none"}, epoch=${this.daveSession.currentEpoch ?? "none"}, transitions=${this.daveSession.pendingTransitionCount}`
       : "transport-only";
     return `Voice channel: <#${this.channelId}> | connection: ${this.connectionState} | playback: ${this.playbackState} | ws ping: ${this.wsPingMs}ms | mode: ${daveMode}`;
   }
@@ -572,11 +596,7 @@ export class DaveVoiceTransport implements VoiceTransport {
       this.log("Voice WebSocket opened.");
       this.logTransportSnapshot("ws-open");
       if (shouldResume) {
-        this.sendJson(VoiceGatewayOpcode.Resume, {
-          server_id: this.guildId,
-          session_id: this.sessionId,
-          token: this.serverUpdate?.token,
-        });
+        this.sendJson(VoiceGatewayOpcode.Resume, this.buildResumePayload());
         return;
       }
 
@@ -611,6 +631,15 @@ export class DaveVoiceTransport implements VoiceTransport {
         }
       }
     });
+  }
+
+  private buildResumePayload(): Record<string, unknown> {
+    return {
+      server_id: this.guildId,
+      session_id: this.sessionId,
+      token: this.serverUpdate?.token,
+      ...(this.lastGatewaySequence >= 0 ? { seq_ack: this.lastGatewaySequence } : {}),
+    };
   }
 
   private handleJsonGatewayMessage(raw: string): void {
@@ -651,9 +680,7 @@ export class DaveVoiceTransport implements VoiceTransport {
         this.handleRecoverySuccess("resumed");
         return;
       case VoiceOpcode.CLIENTS_CONNECT:
-        if (typeof packet.d.user_id === "string") {
-          this.daveSession.addRecognizedUsers([packet.d.user_id]);
-        }
+        this.daveSession.addRecognizedUsers(this.getDaveConnectedUserIds(packet.d));
         return;
       case VoiceOpcode.CLIENT_DISCONNECT:
         if (typeof packet.d.user_id === "string") {
@@ -661,17 +688,54 @@ export class DaveVoiceTransport implements VoiceTransport {
         }
         return;
       case VoiceOpcode.DAVE_PREPARE_TRANSITION:
-        this.handleDaveTransitionJson(this.daveSession.handlePrepareTransition(packet.d as unknown as DavePrepareTransitionPayload));
+        this.handleDavePrepareTransition(packet.d);
         return;
       case VoiceOpcode.DAVE_EXECUTE_TRANSITION:
-        this.handleDaveTransitionJson(this.daveSession.handleExecuteTransition(packet.d as unknown as DaveExecuteTransitionPayload));
+        this.handleDaveExecuteTransition(packet.d);
         return;
       case VoiceOpcode.DAVE_PREPARE_EPOCH:
-        this.handleDaveTransitionJson(this.daveSession.handlePrepareEpoch(packet.d as unknown as DavePrepareEpochPayload));
+        this.handleDavePrepareEpoch(packet.d);
         return;
       default:
         return;
     }
+  }
+
+  private getDaveConnectedUserIds(payload: Record<string, unknown>): string[] {
+    const userIds = Array.isArray(payload.user_ids)
+      ? payload.user_ids.filter((userId): userId is string => typeof userId === "string")
+      : [];
+    if (typeof payload.user_id === "string") {
+      userIds.push(payload.user_id);
+    }
+    return userIds;
+  }
+
+  private handleDavePrepareTransition(payload: unknown): void {
+    const parsed = parseDavePrepareTransitionPayload(payload, this.daveSession.maxProtocolVersion);
+    if (!parsed.ok) {
+      this.log(`[DAVE] Rejected prepare transition payload: ${parsed.error}`);
+      return;
+    }
+    this.handleDaveTransitionJson(this.daveSession.handlePrepareTransition(parsed.value));
+  }
+
+  private handleDaveExecuteTransition(payload: unknown): void {
+    const parsed = parseDaveExecuteTransitionPayload(payload);
+    if (!parsed.ok) {
+      this.log(`[DAVE] Rejected execute transition payload: ${parsed.error}`);
+      return;
+    }
+    this.handleDaveTransitionJson(this.daveSession.handleExecuteTransition(parsed.value));
+  }
+
+  private handleDavePrepareEpoch(payload: unknown): void {
+    const parsed = parseDavePrepareEpochPayload(payload, this.daveSession.maxProtocolVersion);
+    if (!parsed.ok) {
+      this.log(`[DAVE] Rejected prepare epoch payload: ${parsed.error}`);
+      return;
+    }
+    this.handleDaveTransitionJson(this.daveSession.handlePrepareEpoch(parsed.value));
   }
 
   private handleReadyPacket(payload: VoiceReadyPayload): void {
@@ -723,9 +787,20 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.nonceBuffer = payload.mode === "aead_aes256_gcm_rtpsize" ? Buffer.alloc(12) : Buffer.alloc(24);
     this.sequence = randomNBit(16);
     this.timestamp = randomNBit(32);
+    this.speaking = false;
 
     this.log(`Voice session description received with mode=${payload.mode} dave=${payload.dave_protocol_version ?? 0}.`);
-    this.handleDaveTransitionJson(this.daveSession.handleSessionDescription(payload.dave_protocol_version ?? 0));
+    const currentVoiceMembers = this.member.voice.channel?.members.keys() ?? [];
+    this.daveSession.setRecognizedUserIds([...currentVoiceMembers, this.userId].filter(Boolean));
+    const daveInitialized = this.handleDaveTransitionJson(
+      this.daveSession.handleSessionDescription(payload.dave_protocol_version ?? 0),
+    );
+    if (!daveInitialized) {
+      const error = new Error("DAVE session initialization failed.");
+      this.rejectConnect(error);
+      this.disconnect("dave-session-initialization-failed");
+      return;
+    }
 
     this.startUdpKeepAlive();
     this.handleRecoverySuccess("session-description");
@@ -733,46 +808,100 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.resolveConnect();
   }
 
-  private handleDaveTransitionJson(actions: DaveGatewayAction[]): void {
+  private handleDaveTransitionJson(actions: DaveGatewayAction[]): boolean {
     const wasReady = this.isPlaybackReady();
-    this.applyDaveActions(actions);
+    const succeeded = this.applyDaveActions(actions);
     this.handlePlaybackReadinessChange(wasReady);
+    return succeeded;
   }
 
   private handleBinaryGatewayMessage(message: Buffer): void {
-    if (message.length < 3) {
+    const parsed = parseDaveBinaryPacket(message);
+    if (!parsed.ok) {
+      this.log(`[DAVE] ${parsed.error}`);
+      this.logTransportSnapshot(
+        "dave-malformed-packet",
+        `bytes:${message.length},opcode:${message.length >= 3 ? message.readUInt8(2) : "none"}`,
+      );
       return;
     }
 
-    this.lastGatewaySequence = message.readUInt16BE(0);
-    this.log(`[voice] [WS] << binary seq=${this.lastGatewaySequence} op=${message.readUInt8(2)} bytes=${message.length}`);
+    this.lastGatewaySequence = parsed.value.sequence;
+    this.log(`[voice] [WS] << binary seq=${this.lastGatewaySequence} op=${parsed.value.opcode} bytes=${message.length}`);
 
     const wasReady = this.isPlaybackReady();
-    this.applyDaveActions(this.daveSession.handleBinaryMessage(message));
+    const succeeded = this.applyDaveActions(this.daveSession.handleBinaryMessage(message));
     this.handlePlaybackReadinessChange(wasReady);
+    if (!succeeded && !this.destroyed) {
+      this.disconnect("dave-operation-failed");
+    }
   }
 
-  private applyDaveActions(actions: DaveGatewayAction[]): void {
+  private applyDaveActions(actions: DaveGatewayAction[]): boolean {
+    let succeeded = true;
     for (const action of actions) {
       if (action.kind === "log") {
         this.log(`[DAVE] ${action.message}`);
+        if (action.event) {
+          this.logTransportSnapshot(action.event, action.extra);
+        }
       } else if (action.kind === "send-json") {
         this.sendJson(action.op, action.data);
       } else if (action.kind === "send-binary") {
         this.sendBinary(action.op, action.body);
+      } else if (action.kind === "failure") {
+        succeeded = false;
+        this.log(`[DAVE] ${action.operation} failed: ${action.message}`);
+        this.logTransportSnapshot(
+          "dave-operation-failed",
+          [
+            `operation:${action.operation}`,
+            `protocolVersion:${action.protocolVersion}`,
+            `transitionId:${action.transitionId ?? "none"}`,
+          ].join(","),
+        );
+        this.playback?.source.pause();
+        this.setSpeaking(false);
       }
     }
+    return succeeded;
   }
 
   private handlePlaybackReadinessChange(previouslyReady: boolean): void {
     const ready = this.isPlaybackReady();
+    if (ready) {
+      this.clearDaveReadinessTimer();
+    }
     if (!previouslyReady && ready && this.playback && !this.playback.paused) {
       this.log(`DAVE session is ready for playback (${this.daveSession.currentVoicePrivacyCode || "no privacy code"}).`);
       this.playback.source.resume();
     } else if (previouslyReady && !ready && this.playback) {
       this.log("Playback paused while the DAVE session transitions.");
       this.playback.source.pause();
+      this.startDaveReadinessTimeout();
     }
+  }
+
+  private startDaveReadinessTimeout(): void {
+    if (this.daveReadinessTimer || !this.playback || this.daveSession.currentProtocolVersion === 0) {
+      return;
+    }
+    this.daveReadinessTimer = setTimeout(() => {
+      this.daveReadinessTimer = null;
+      this.handleDaveReadinessTimeout();
+    }, DAVE_READINESS_TIMEOUT_MS);
+    this.daveReadinessTimer.unref();
+  }
+
+  private handleDaveReadinessTimeout(): void {
+    if (!this.playback || this.isPlaybackReady() || this.destroyed) {
+      return;
+    }
+    this.logTransportSnapshot(
+      "dave-readiness-timeout",
+      `protocolVersion:${this.daveSession.currentProtocolVersion},status:${this.daveSession.currentSessionStatus ?? "none"},pendingTransitions:${this.daveSession.pendingTransitionCount}`,
+    );
+    this.disconnect("dave-readiness-timeout");
   }
 
   private async performIpDiscovery(remoteIp: string, remotePort: number, ssrc: number): Promise<{ ip: string; port: number }> {
@@ -928,8 +1057,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     }
 
     this.playback.underrunLogged = false;
-    this.sendOpusFrame(frame);
-    return true;
+    return this.sendOpusFrame(frame);
   }
 
   private dropPlaybackFrames(count: number): number {
@@ -991,14 +1119,20 @@ export class DaveVoiceTransport implements VoiceTransport {
     });
 
     worker.on("exit", (code) => {
-      if (code !== 0 && !this.playback?.tickerTerminationExpected) {
-        this.log(`Playback ticker worker exited with code ${code}.`);
+      const activePlayback = this.playback;
+      const isActiveTicker = activePlayback?.ticker === worker;
+      if (shouldLogPlaybackTickerExit(
+        code,
+        isActiveTicker,
+        activePlayback?.tickerTerminationExpected ?? false,
+      )) {
+        this.log(`Playback ticker worker unexpectedly exited with code ${code}; falling back to the main-thread timer.`);
       }
-      if (!this.playback || this.playback.ticker !== worker) {
+      if (!activePlayback || !isActiveTicker) {
         return;
       }
-      this.playback.ticker = null;
-      if (!this.playback.paused) {
+      activePlayback.ticker = null;
+      if (!activePlayback.paused) {
         this.schedulePlaybackTick();
       }
     });
@@ -1108,9 +1242,9 @@ export class DaveVoiceTransport implements VoiceTransport {
     immediate.unref();
   }
 
-  private sendOpusFrame(opusFrame: Buffer): void {
+  private sendOpusFrame(opusFrame: Buffer): boolean {
     if (!this.udp || !this.secretKey || !this.encryptionMode) {
-      return;
+      return false;
     }
 
     const header = Buffer.alloc(12);
@@ -1120,16 +1254,30 @@ export class DaveVoiceTransport implements VoiceTransport {
     header.writeUInt32BE(this.timestamp, 4);
     header.writeUInt32BE(this.ssrc, 8);
 
-    const daveFrame = this.daveSession.ready && !opusFrame.equals(SILENCE_FRAME)
-      ? this.daveSession.encryptOpus(opusFrame)
-      : opusFrame;
+    let daveFrame: Buffer;
+    try {
+      daveFrame = this.daveSession.ready
+        ? this.daveSession.encryptOpus(opusFrame)
+        : opusFrame;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const playbackId = this.playback?.playbackId ?? null;
+      this.log(`DAVE Opus encryption failed: ${err.message}`);
+      this.logTransportSnapshot("dave-encryption-failed", `playbackId:${playbackId ?? "none"}`);
+      this.stop();
+      this.callbacks.onPlaybackError?.(err, playbackId);
+      return false;
+    }
     const encrypted = this.encryptTransportPacket(daveFrame, header);
     const packet = Buffer.concat([header, encrypted.cipherText, encrypted.noncePadding]);
 
+    if (!this.setSpeaking(true)) {
+      return false;
+    }
     this.sendUdpPacket(packet);
     this.sequence = (this.sequence + 1) & 0xffff;
     this.timestamp = (this.timestamp + RTP_TIMESTAMP_INCREMENT) >>> 0;
-    this.setSpeaking(true);
+    return true;
   }
 
   private encryptTransportPacket(opusFrame: Buffer, header: Buffer): { cipherText: Buffer; noncePadding: Buffer } {
@@ -1165,17 +1313,21 @@ export class DaveVoiceTransport implements VoiceTransport {
     }
   }
 
-  private setSpeaking(speaking: boolean): void {
-    if (this.speaking === speaking || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return;
+  private setSpeaking(speaking: boolean): boolean {
+    if (this.speaking === speaking) {
+      return true;
     }
 
     this.speaking = speaking;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return !speaking;
+    }
     this.sendJson(VoiceGatewayOpcode.Speaking, {
       speaking: speaking ? 1 : 0,
       delay: 0,
       ssrc: this.ssrc,
     });
+    return true;
   }
 
   private chooseEncryptionMode(modes: string[]): SupportedEncryptionMode {
@@ -1225,6 +1377,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.recoveryAttempts = nextAttempt;
     this.recoveringReason = reason;
     this.setConnectionState("recovering");
+    this.clearRecoveryReconcileTimer();
     this.pausePlaybackForRecovery();
     this.setSpeaking(false);
     this.cleanupWebSocketForRecovery();
@@ -1259,6 +1412,27 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.recoveringReason = null;
     this.logTransportSnapshot("recovery-resumed", `status:${status},reason:${reason}`);
     this.setConnectionState("connected");
+    if (status === "resumed") {
+      this.scheduleRecoveryReconciliation();
+    } else {
+      this.resumePlaybackAfterRecovery();
+    }
+  }
+
+  private scheduleRecoveryReconciliation(): void {
+    this.clearRecoveryReconcileTimer();
+    this.recoveryReconcileTimer = setTimeout(() => {
+      this.recoveryReconcileTimer = null;
+      this.completeRecoveryReconciliation();
+    }, DAVE_RESUME_RECONCILE_MS);
+    this.recoveryReconcileTimer.unref();
+  }
+
+  private completeRecoveryReconciliation(): void {
+    if (this.destroyed || this.connectionState !== "connected") {
+      return;
+    }
+    this.logTransportSnapshot("recovery-reconciled", `daveReady:${this.daveSession.ready}`);
     this.resumePlaybackAfterRecovery();
   }
 
@@ -1318,6 +1492,8 @@ export class DaveVoiceTransport implements VoiceTransport {
 
   private cleanupNetwork(): void {
     this.clearRecoveryTimer();
+    this.clearRecoveryReconcileTimer();
+    this.clearDaveReadinessTimer();
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
@@ -1401,6 +1577,22 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.recoveryTimer = null;
   }
 
+  private clearRecoveryReconcileTimer(): void {
+    if (!this.recoveryReconcileTimer) {
+      return;
+    }
+    clearTimeout(this.recoveryReconcileTimer);
+    this.recoveryReconcileTimer = null;
+  }
+
+  private clearDaveReadinessTimer(): void {
+    if (!this.daveReadinessTimer) {
+      return;
+    }
+    clearTimeout(this.daveReadinessTimer);
+    this.daveReadinessTimer = null;
+  }
+
   private sendUdpPacket(packet: Buffer): void {
     if (!this.udp || !this.udpRemoteIp || !this.udpRemotePort) {
       throw new Error("Voice UDP transport is not ready to send packets yet.");
@@ -1467,6 +1659,10 @@ export class DaveVoiceTransport implements VoiceTransport {
       daveProtocolVersion: this.daveSession.currentProtocolVersion,
       daveReady: this.daveSession.ready,
       davePrivacyCode: this.daveSession.currentVoicePrivacyCode || null,
+      daveSessionStatus: this.daveSession.currentSessionStatus,
+      daveEpoch: this.daveSession.currentEpoch,
+      davePendingTransitions: this.daveSession.pendingTransitionCount,
+      daveRecognizedUsers: this.daveSession.recognizedUserCount,
       missedHeartbeats: this.missedHeartbeats,
       lastHeartbeatAgeMs: this.lastHeartbeatSentAt > 0 ? now - this.lastHeartbeatSentAt : null,
       wsPingMs: this.wsPingMs,
