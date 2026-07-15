@@ -231,7 +231,7 @@ export class MusicService {
       state.connectionStatus = "connected";
       this.recordDiagnostic(guildId, "Voice connection reached Ready.");
     } catch (error) {
-      this.sessions.delete(guildId);
+      this.clearSession(guildId, true, "voice-connect-failed");
       state.connectionStatus = "disconnected";
       state.voiceChannelId = null;
       state.textChannelId = null;

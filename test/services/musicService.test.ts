@@ -585,6 +585,58 @@ test("stale playback-finished callbacks do not clear the replacement track", asy
   assert.equal(disconnectReason, null);
 });
 
+test("failed voice joins destroy the transport instead of leaving a stale adapter", async () => {
+  let disconnectReason: string | null = null;
+  const service = new MusicService(
+    1000,
+    true,
+    false,
+    null,
+    () => ({
+      guildId: "guild-1",
+      channelId: "voice-1",
+      connect: async () => {
+        throw new Error("Timed out while establishing the voice connection.");
+      },
+      disconnect: (reason?: string) => {
+        disconnectReason = reason ?? null;
+      },
+      play: () => undefined,
+      pause: () => false,
+      resume: () => false,
+      stop: () => undefined,
+      isConnected: () => false,
+      getDebugState: () => "connecting",
+    }),
+  );
+
+  await assert.rejects(
+    service.ensureVoiceConnection({
+      guild: {
+        id: "guild-1",
+        members: { me: { id: "bot-1" } },
+      },
+      voice: {
+        channel: {
+          id: "voice-1",
+          type: 2,
+          joinable: true,
+          speakable: true,
+          full: false,
+          name: "Voice",
+          permissionsFor: () => ({ has: () => true }),
+        },
+      },
+      client: { user: { id: "bot-1" } },
+    } as never),
+    /Could not connect to your voice channel before timeout/,
+  );
+
+  assert.equal(disconnectReason, "voice-connect-failed");
+  assert.equal(service.getState("guild-1").connectionStatus, "disconnected");
+  assert.equal(service.getVoiceSummary("guild-1"), "Not connected to voice.");
+});
+
 test("disconnect forwards a labeled reason into voice teardown diagnostics", () => {
   const diagnostics: string[] = [];
   let receivedReason: string | null = null;

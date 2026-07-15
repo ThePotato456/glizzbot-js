@@ -173,10 +173,10 @@ Acceptance criteria:
 - [x] Run `npm test`.
 - [x] Run `npm run test:coverage`.
 - [ ] Perform repeated local connect, play, pause, resume, skip, stop, and disconnect cycles.
-- [ ] Test participant join and leave events while music is playing.
-- [ ] Test an abnormal WebSocket close during active DAVE playback and verify sequence-aware resume.
+- [x] Test participant join and leave events while music is playing.
+- [x] Test an abnormal WebSocket close during active DAVE playback and verify sequence-aware resume.
 - [ ] Test a forced fresh voice negotiation after resume failure.
-- [ ] Confirm queue state and current track survive recoverable loss.
+- [x] Confirm queue state and current track survive recoverable loss.
 - [ ] Confirm unrecoverable DAVE failures produce a labeled teardown and useful snapshot.
 - [ ] Review logs for plaintext payload leakage and duplicate playback advancement.
 
@@ -193,7 +193,7 @@ Acceptance criteria:
 - [x] Document recovery behavior, fatal conditions, and the meaning of DAVE diagnostics.
 - [x] Record the tested Davey package version and Discord Voice Gateway version.
 - [x] Review the final diff for unrelated files and generated artifacts.
-- [ ] Commit the rework in logical commits or one reviewed final commit, as agreed before implementation.
+- [x] Commit the rework in logical commits or one reviewed final commit, as agreed before implementation.
 
 ## Recommended Implementation Order
 
@@ -221,6 +221,7 @@ Acceptance criteria:
 ## Current Verification
 
 - TypeScript build: passing.
-- Automated tests: 109 passing.
+- Automated tests: 115 passing.
 - Coverage: 82.16% lines, 77.61% branches, and 83.71% functions on the latest coverage run before the final test-only additions.
-- Live Discord staging checks remain pending in Step 11.
+- Live staging confirmed participant transitions and an active-playback `1006` Resume with the current playback ID preserved.
+- A `4022` call termination exposed invalid repeated Resume attempts; `4022` now tears down immediately and `4006`/`4009` switch recovery to Identify. Live verification of that fresh negotiation remains pending.

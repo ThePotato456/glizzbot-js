@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildQueuePages, createMusicCommands } from "../../src/commands/music.js";
+import { buildQueuePages, createMusicCommands, fitDiscordMessage } from "../../src/commands/music.js";
 import type { BotCommand, CommandContext, MusicState, QueueItem } from "../../src/types.js";
 
 interface ReplyRecord {
@@ -172,6 +172,15 @@ function getCommand(commands: BotCommand[], name: string): BotCommand {
   assert.ok(command, `Expected command ${name} to exist`);
   return command;
 }
+
+test("voice diagnostics are bounded to Discord's message limit", () => {
+  const content = `Voice state\n${"x".repeat(3_000)}`;
+  const fitted = fitDiscordMessage(content);
+
+  assert.equal(fitted.length, 2_000);
+  assert.match(fitted, /\[diagnostics truncated\]$/);
+  assert.equal(fitDiscordMessage("short diagnostics"), "short diagnostics");
+});
 
 test("queue embeds paginate tracks and preserve their queue positions", () => {
   const { bot, state } = createBotMock();

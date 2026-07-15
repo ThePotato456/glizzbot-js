@@ -15,6 +15,8 @@ const PLAYRANDOM_MAX = 10;
 const QUEUE_PAGE_SIZE = 10;
 const QUEUE_TITLE_MAX_LENGTH = 300;
 const QUEUE_TIMEOUT_MS = 2 * 60 * 1000;
+const DISCORD_MESSAGE_MAX_LENGTH = 2_000;
+const TRUNCATION_NOTICE = "\n[diagnostics truncated]";
 
 interface PlayrandomTarget {
   userId?: string;
@@ -24,6 +26,16 @@ interface PlayrandomTarget {
 interface PlayrandomRequest {
   amount: number;
   targetArg?: string;
+}
+
+export function fitDiscordMessage(content: string, maxLength = DISCORD_MESSAGE_MAX_LENGTH): string {
+  if (content.length <= maxLength) {
+    return content;
+  }
+  if (maxLength <= TRUNCATION_NOTICE.length) {
+    return content.slice(0, maxLength);
+  }
+  return `${content.slice(0, maxLength - TRUNCATION_NOTICE.length)}${TRUNCATION_NOTICE}`;
 }
 
 export function buildQueuePages(bot: GlizzBot, guildId: string): EmbedBuilder[] {
@@ -230,7 +242,7 @@ export function createMusicCommands(bot: GlizzBot): BotCommand[] {
           `Music state: ${bot.music.getVoiceSummary(ctx.guild.id)}`,
           diagnostics.length > 0 ? `Recent diagnostics:\n${diagnostics.join("\n")}` : "Recent diagnostics: none",
         ];
-        await ctx.reply(lines.join("\n"));
+        await ctx.reply(fitDiscordMessage(lines.join("\n")));
       },
     },
     {

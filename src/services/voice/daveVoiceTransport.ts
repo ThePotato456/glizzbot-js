@@ -45,6 +45,10 @@ const MAX_RECOVERY_ATTEMPTS = 3;
 const RECOVERY_BACKOFF_MS = [500, 1_500, 3_000] as const;
 const DAVE_RESUME_RECONCILE_MS = 100;
 const DAVE_READINESS_TIMEOUT_MS = 15_000;
+const IDENTIFY_RECOVERY_CLOSE_CODES = new Set([4006, 4009]);
+const FATAL_VOICE_CLOSE_CODES = new Set([4004, 4011, 4012, 4014, 4016, 4017, 4020, 4021, 4022]);
+
+type RecoveryHandshake = "resume" | "identify";
 
 type SupportedEncryptionMode =
   | "aead_aes256_gcm_rtpsize"
@@ -297,6 +301,7 @@ export class DaveVoiceTransport implements VoiceTransport {
   private recoveryReconcileTimer: NodeJS.Timeout | null = null;
   private daveReadinessTimer: NodeJS.Timeout | null = null;
   private recoveringReason: string | null = null;
+  private recoveryHandshake: RecoveryHandshake = "resume";
 
   private secretKey: Uint8Array | null = null;
   private encryptionMode: SupportedEncryptionMode | null = null;
@@ -588,7 +593,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     }
 
     this.endpoint = this.serverUpdate.endpoint;
-    const shouldResume = this.connectionState === "recovering";
+    const shouldResume = this.connectionState === "recovering" && this.recoveryHandshake === "resume";
     const address = `wss://${this.serverUpdate.endpoint}?v=8&encoding=json`;
     this.log(`Opening voice WebSocket ${address}.`);
     this.ws = new WebSocket(address);
@@ -621,16 +626,30 @@ export class DaveVoiceTransport implements VoiceTransport {
     });
     this.ws.on("close", (code, reasonBuffer) => {
       const reason = reasonBuffer.toString("utf8");
-      this.log(`Voice WebSocket close event code=${code} reason=${reason || "none"}.`);
-      this.logTransportSnapshot("ws-close", `code:${code},reason:${reason || "none"}`);
-      if (!this.destroyed) {
-        const closeError = new Error(`Voice WebSocket closed with code ${code}${reason ? ` (${reason})` : ""}.`);
-        if (!this.handleRecoverableTransportLoss(`ws-close:${code}:${reason || "none"}`)) {
-          this.rejectConnect(closeError);
-          this.disconnect(`ws-close:${code}`);
-        }
-      }
+      this.handleVoiceWebSocketClose(code, reason);
     });
+  }
+
+  private handleVoiceWebSocketClose(code: number, reason: string): void {
+    this.log(`Voice WebSocket close event code=${code} reason=${reason || "none"}.`);
+    this.logTransportSnapshot("ws-close", `code:${code},reason:${reason || "none"}`);
+    if (this.destroyed) {
+      return;
+    }
+
+    const closeError = new Error(`Voice WebSocket closed with code ${code}${reason ? ` (${reason})` : ""}.`);
+    if (FATAL_VOICE_CLOSE_CODES.has(code)) {
+      this.rejectConnect(closeError);
+      this.disconnect(`ws-close:${code}`);
+      return;
+    }
+    if (IDENTIFY_RECOVERY_CLOSE_CODES.has(code)) {
+      this.recoveryHandshake = "identify";
+    }
+    if (!this.handleRecoverableTransportLoss(`ws-close:${code}:${reason || "none"}`)) {
+      this.rejectConnect(closeError);
+      this.disconnect(`ws-close:${code}`);
+    }
   }
 
   private buildResumePayload(): Record<string, unknown> {
@@ -1376,6 +1395,9 @@ export class DaveVoiceTransport implements VoiceTransport {
 
     this.recoveryAttempts = nextAttempt;
     this.recoveringReason = reason;
+    if (nextAttempt === 1 && !IDENTIFY_RECOVERY_CLOSE_CODES.has(this.getCloseCodeFromRecoveryReason(reason))) {
+      this.recoveryHandshake = "resume";
+    }
     this.setConnectionState("recovering");
     this.clearRecoveryReconcileTimer();
     this.pausePlaybackForRecovery();
@@ -1384,7 +1406,7 @@ export class DaveVoiceTransport implements VoiceTransport {
     this.clearHeartbeatState();
 
     const backoffMs = RECOVERY_BACKOFF_MS[Math.min(nextAttempt - 1, RECOVERY_BACKOFF_MS.length - 1)] ?? RECOVERY_BACKOFF_MS.at(-1)!;
-    this.logTransportSnapshot(nextAttempt === 1 ? "recovery-start" : "recovery-attempt", `attempt:${nextAttempt},reason:${reason},backoffMs:${backoffMs}`);
+    this.logTransportSnapshot(nextAttempt === 1 ? "recovery-start" : "recovery-attempt", `attempt:${nextAttempt},reason:${reason},handshake:${this.recoveryHandshake},backoffMs:${backoffMs}`);
 
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = null;
@@ -1392,7 +1414,7 @@ export class DaveVoiceTransport implements VoiceTransport {
         return;
       }
 
-      this.logTransportSnapshot("recovery-attempt", `attempt:${this.recoveryAttempts},reason:${this.recoveringReason ?? "unknown"}`);
+      this.logTransportSnapshot("recovery-attempt", `attempt:${this.recoveryAttempts},reason:${this.recoveringReason ?? "unknown"},handshake:${this.recoveryHandshake}`);
       this.maybeOpenWebSocket();
     }, backoffMs);
     this.recoveryTimer.unref();
@@ -1403,11 +1425,13 @@ export class DaveVoiceTransport implements VoiceTransport {
     if (this.connectionState !== "recovering") {
       this.recoveryAttempts = 0;
       this.recoveringReason = null;
+      this.recoveryHandshake = "resume";
       return;
     }
 
     this.clearRecoveryTimer();
     this.recoveryAttempts = 0;
+    this.recoveryHandshake = "resume";
     const reason = this.recoveringReason ?? "unknown";
     this.recoveringReason = null;
     this.logTransportSnapshot("recovery-resumed", `status:${status},reason:${reason}`);
@@ -1456,8 +1480,27 @@ export class DaveVoiceTransport implements VoiceTransport {
     }
 
     const packet = JSON.stringify({ op, d: data });
-    this.log(`[voice] [WS] >> ${packet}`);
+    const diagnosticData = this.redactVoiceCredentials(op, data);
+    this.log(`[voice] [WS] >> ${JSON.stringify({ op, d: diagnosticData })}`);
     this.ws.send(packet);
+  }
+
+  private redactVoiceCredentials(op: number, data: unknown): unknown {
+    if (
+      op !== VoiceGatewayOpcode.Identify
+      && op !== VoiceGatewayOpcode.Resume
+    ) {
+      return data;
+    }
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      return data;
+    }
+    return { ...data, token: "[REDACTED]" };
+  }
+
+  private getCloseCodeFromRecoveryReason(reason: string): number {
+    const match = /^ws-close:(\d+):/.exec(reason);
+    return match ? Number.parseInt(match[1]!, 10) : -1;
   }
 
   private sendBinary(op: number, body: Buffer): void {

@@ -525,3 +525,51 @@ test("recovery exhaustion performs full disconnect", () => {
   assert.equal(harness.disconnectCalls, 1);
   assert.equal(harness.snapshots[0]?.event, "recovery-exhausted");
 });
+
+test("call-terminated close performs fatal teardown instead of resume recovery", () => {
+  const harness = createRecoveryHarness({
+    rejectConnect: () => undefined,
+    log: () => undefined,
+  });
+
+  harness.transport.handleVoiceWebSocketClose(4022, "Disconnected: Call terminated.");
+
+  assert.equal(harness.disconnectCalls, 1);
+  assert.equal(harness.transport.recoveryTimer, null);
+  assert.ok(harness.snapshots.some((snapshot) => snapshot.event === "ws-close"));
+  assert.ok(!harness.snapshots.some((snapshot) => snapshot.event === "recovery-start"));
+});
+
+test("invalid resumed session retries with a fresh identify handshake", () => {
+  const harness = createRecoveryHarness({
+    connectionState: "recovering",
+    recoveryAttempts: 1,
+    recoveryHandshake: "resume",
+    ws: null,
+    rejectConnect: () => undefined,
+    log: () => undefined,
+  });
+
+  harness.transport.handleVoiceWebSocketClose(4006, "Session is no longer valid.");
+  harness.clearRecoveryTimer();
+
+  assert.equal(harness.disconnectCalls, 0);
+  assert.equal(harness.transport.recoveryAttempts, 2);
+  assert.equal(harness.transport.recoveryHandshake, "identify");
+  assert.ok(harness.snapshots.some((snapshot) => snapshot.extra?.includes("handshake:identify")));
+});
+
+test("voice authentication tokens are redacted from diagnostic payloads", () => {
+  const transport = Object.create(DaveVoiceTransport.prototype) as any;
+  const payload = {
+    server_id: "guild-1",
+    session_id: "session-1",
+    token: "secret-token",
+  };
+
+  assert.deepEqual(transport.redactVoiceCredentials(7, payload), {
+    ...payload,
+    token: "[REDACTED]",
+  });
+  assert.deepEqual(transport.redactVoiceCredentials(3, payload), payload);
+});
